@@ -436,8 +436,10 @@ def diff(args):
 
 def update(args):
     pst = read_pst(args.pst) if args.pst else None
-    par = args.par or pst
-    obs = pst if args.par is None and args.obs_csv is None and args.res is None else None
+    # With result files, --pst supplies context rather than additional values to write.
+    pst_only = args.par is None and args.obs_csv is None and args.res is None
+    par = args.par or (pst if pst_only else None)
+    obs = pst if pst_only else None
     if args.par and pst is not None:
         # .par values with the groups from the pst, so --group can apply to them
         par = (read_par(args.par, args.real).reset_index()

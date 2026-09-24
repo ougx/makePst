@@ -266,6 +266,52 @@ def test_update_cli_par_with_pst_does_not_write_observations(book_copy):
     assert _col(book_copy, 'PAR_HK', 'PARVAL1')[0] == pytest.approx(49.73775 * 2)
 
 
+@pytest.mark.parametrize('result_flag,result_file', [
+    ('--res', 'demo.res'),
+    ('--obs_csv', 'demo.3.obs.csv'),
+])
+def test_update_cli_observations_with_pst_preserves_parameters(book_copy, result_flag, result_file):
+    wb = openpyxl.load_workbook(book_copy)
+    parameter_sheets = [name for name in wb.sheetnames if name.startswith('PAR_')]
+    for name in parameter_sheets:
+        ws = wb[name]
+        column = [c.value for c in ws[1]].index('PARVAL1') + 1
+        ws.cell(2, column, 7.0)             # user edits differ from the contextual control file
+        ws.cell(3, column, '=1+2')
+    before = {name: list(wb[name].values) for name in parameter_sheets}
+    wb.save(book_copy)
+    wb.close()
+    observation_weights = _col(book_copy, 'OBS_HEAD', 'WEIGHT')
+
+    main(['update', book_copy, result_flag, os.path.join(DATA, result_file), '--pst', PST,
+          '--backend', 'openpyxl'])
+
+    after = openpyxl.load_workbook(book_copy)
+    try:
+        assert {name: list(after[name].values) for name in parameter_sheets} == before
+        assert 'PHI' in after.sheetnames
+    finally:
+        after.close()
+    assert _col(book_copy, 'OBS_HEAD', 'MODELLED')[0] == pytest.approx(2543.59)
+    assert _col(book_copy, 'OBS_HEAD', 'RESIDUAL') == [-1.0] * 4
+    assert _col(book_copy, 'OBS_HEAD', 'WEIGHT') == observation_weights
+
+
+def test_update_cli_pst_only_writes_parameters_and_observations(book_copy):
+    wb = openpyxl.load_workbook(book_copy)
+    for sheet, field, value in [('PAR_HK', 'PARVAL1', 7.0), ('OBS_HEAD', 'WEIGHT', 8.0)]:
+        ws = wb[sheet]
+        column = [c.value for c in ws[1]].index(field) + 1
+        ws.cell(2, column, value)
+    wb.save(book_copy)
+    wb.close()
+
+    main(['update', book_copy, '--pst', PST, '--backend', 'openpyxl'])
+
+    assert _col(book_copy, 'PAR_HK', 'PARVAL1')[0] == pytest.approx(49.73775)
+    assert _col(book_copy, 'OBS_HEAD', 'WEIGHT')[0] == pytest.approx(0.15)
+
+
 # ---------------------------------------------------------------------- PESTPP-IES ensembles
 PAR_CSV = os.path.join(DATA, 'demo.3.par.csv')
 OBS_CSV = os.path.join(DATA, 'demo.3.obs.csv')

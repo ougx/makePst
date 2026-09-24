@@ -213,6 +213,8 @@ refuse), only counted. `--sheet` (glob, case-insensitive) restricts the workshee
 add `--pst` to supply them). `--pst` on its own writes the control file's parameter and
 observation columns; next to `--par`, `--res` or `--obs_csv` it only supplies groups and
 measured values, and the observation sheets are not touched by a parameter update.
+Likewise, `--res` or `--obs_csv` with `--pst` leaves parameter cells unchanged unless
+`--par` is also supplied.
 
 The xlwings backend reads only each sheet's header, name column and target columns, writes
 contiguous runs of cells in one call each and recalculates once before saving: the
