@@ -169,6 +169,15 @@ overrides `pestmode` in the CONTROL sheet; adding prior information switches to 
 | IO      | `TYPE` (`cmd` / `tpl` / `ins`), `IN`, `OUT` |
 | PP      | first two columns: PEST++ option name, value → `++name(value)` |
 
+Classic PEST numeric control settings are positional. If a later setting is supplied,
+all earlier numeric settings on that line must have values after built-in defaults
+are applied. For example, `upvecbend` requires `iboundstick`, and `regsingthresh`
+requires both `noptregadj` and `regweightrat`. Export raises an error naming any
+missing predecessors instead of shifting settings into the wrong slots. Supply
+those values explicitly; trailing optional fields may remain blank. Text flags
+and named tokens such as `absparmax(1)=0.1` do not require numeric fillers. This
+positional requirement does not apply to the version-2 keyword format (`--v2`).
+
 **Regularisation from the parameter table.** In regularisation mode each adjustable
 parameter with a `PRIOR` and a positive `WEIGHT` gets an equation: a numeric `PRIOR` gives
 `1.0 * log(p) = log10(v)` (or `1.0 * p = v` for untransformed parameters); a `PRIOR` naming

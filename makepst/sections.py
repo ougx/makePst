@@ -100,10 +100,24 @@ class Section:
         out = [self.header]
         for i, keys in enumerate(self.lines):
             fields = []
+            missing = []
             for k in keys:
                 s = fmt(v.get(k))
+                # Flags and name=value tokens identify themselves; all other
+                # values need every earlier positional slot on this line.
+                named = k in KEYED or (s != '' and all(
+                    '=' in tok and re.split(r'[=(]', tok, maxsplit=1)[0].lower() == k
+                    for tok in s.split()))
+                positional = k not in self.flags and not named
                 if s == '':
+                    if positional:
+                        missing.append(k)
                     continue
+                if positional and missing:
+                    raise ValueError(
+                        f'{self.header}, line {i + 1}: {k} requires preceding positional '
+                        f'field(s) {", ".join(missing)}; supply explicit values to '
+                        'prevent settings shifting into the wrong positions')
                 if k in KEYED:
                     s = f'{k}={s}'
                 fields.append(f'{s:<10}')
