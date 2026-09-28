@@ -455,8 +455,8 @@ the workbook?" even after the file was renamed or overwritten. `--check` adds a 
 `provenance`: `unchanged` / `changed` / `missing`.
 
 ```
-2026-09-19 21:14 build      pest/tr13.pst <- tr13.xlsx  [1068 par 41747 obs 159 prior]  makepst 0.3.0
-2026-09-21 08:10 update     tr13-xlwings.xlsx <- tr13.xlsx, tr13.par  [1068 rows in 8 sheets]  makepst 0.3.0
+2026-09-19 21:14 build      pest/tr13.pst <- tr13.xlsx  [1068 par 41747 obs 159 prior]  makepst 0.4.0
+2026-09-21 08:10 update     tr13-xlwings.xlsx <- tr13.xlsx, tr13.par  [1068 rows in 8 sheets]  makepst 0.4.0
 ```
 
 ### bundle — a run, zipped for review
@@ -592,7 +592,7 @@ from?" after the fact:
 
 ```json
 {
-  "makepst": "0.3.0",
+  "makepst": "0.4.0",
   "command": "build",
   "argv": ["build", "tr13.pst", "regul", "--set_ctl_xls", "tr13.xlsx,CONTROL", "..."],
   "created": "2026-09-19T13:51:39-04:00",
@@ -716,7 +716,7 @@ stored anywhere. To release: bump the version in `pyproject.toml` and the fallba
 `makepst/__init__.py` (a test keeps them equal), add a `CHANGELOG.md` entry, commit, then
 
 ```
-git tag v0.3.0 && git push origin main v0.3.0
+git tag v0.4.0 && git push origin main v0.4.0
 ```
 
 The `publish` workflow checks that the tag matches the package version, runs the tests, builds

@@ -109,10 +109,10 @@ def figure():
     s += text(60, 563, 'Example provenance manifest (excerpt)', 'h', 'start')
     s += text(60, 586, 'Written beside each produced file; full JSON also records timestamps, platform, and input roles.',
               anchor='start')
-    s += text(60, 616, 'makepst: 0.3.0', 'm', 'start')
+    s += text(60, 616, 'makepst: 0.4.0', 'm', 'start')
     s += text(60, 638, 'command: build', 'm', 'start')
     s += text(60, 660, 'argv: makepst build tr13.pst regul ...', 'm', 'start')
-    s += text(505, 616, 'source: tr13.xlsm   sha256: b43fc509eafe...', 'm', 'start')
+    s += text(505, 616, 'source: tr13.xlsx   sha256: b43fc509eafe...', 'm', 'start')
     s += text(505, 638, 'sheets: 20', 'm', 'start')
     s += text(505, 660, 'output: tr13.pst    sha256: 7b9f82a69ab9...', 'm', 'start')
     s += text(505, 682, 'dimensions: 1,068 parameters · 41,747 observations', 'm', 'start')

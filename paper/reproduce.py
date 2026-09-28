@@ -1,6 +1,6 @@
 """Regenerate the numbers in the manuscript's demonstration section and Table 1.
 
-    python paper/reproduce.py <workbook.xlsm> [work_dir]
+    python paper/reproduce.py <workbook.xlsx> [work_dir]
 
 The workbook is the calibration workbook (sheets CONTROL, PARGP, PAR_*, OBS_*, IO, PPcntl,
 PPglm). All outputs go to work_dir (default: a temporary folder). Nothing in the project
