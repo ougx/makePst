@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0 (2026-09-27)
+
+- `rescale` / `Pst.rescale_par()`: move parameter values into `SCALE` so each selected parameter
+  starts at 1 (bounds divided by the value), or back with `--undo`; the model sees the same values.
+  Selection by `--par` globs and `--pargp` (fixed parameters included unless `--exclude_fixed`;
+  tied children follow their parent). Prior-information equations are rewritten exactly (every
+  residual is unchanged), and settings in parameter units that cannot be converted (absolute
+  derivative increments, `absolute(n)` limits, `++parcov` / `++base_jacobian` / `++ies_par_en`)
+  are reported.
+- `fill_parval` (`build --fill_parval`, `parrep`), `tempchek --par` and `hpstart --par` convert a
+  `.par` value written under a different `SCALE` / `OFFSET` than the control file's through the
+  model value, instead of copying `PARVAL1` across. The test fixture's `demo.par` now records the
+  parameters' own offsets, as PEST writes them.
+- Writing a control file no longer fails on an adjustable `PARVAL1` outside its bounds (a `parrep`
+  from an IES realization, say): it is a warning, as documented, and the file is written.
+  `makepst validate` still reports it as an error. `diff` normalizes a workbook side, as `build`
+  would, so a workbook compares equal to the control file built from it.
+
+- `reweight`: balance observation-group contributions equally or to relative target shares,
+  multiply selected group weights directly, match weights to the current misfit with
+  `--discrepancy group|obs` (group phi = weighted-observation count, or `w = min(w, 1/|r|)`), consume `.res`/IES observation results, enforce
+  optional weight bounds with `--clip`, and write an auditable before/after report.
+
+- `++` options are checked against PEST++ 5.2.29's option list (`makepst/pestpp.py`): a known option
+  with a value PEST++ would not accept, or the same option twice (also through an alias), is an error;
+  an unknown option is a warning with the closest known name (`did you mean "ies_num_reals"?`) and is
+  kept as written. Findings name the workbook cell, csv line or control-file line the option came from
+  (`PP!A17`). `validate` reports them; `build`, `parrep` and `set` print them but still write.
+
+- Unknown control-file sections are retained verbatim, including their original header,
+  body lines and position, instead of being dropped during a read/write round trip.
+- `Pst.validate()` now returns a read-only report; `apply_fixes(report)` and `normalize()` make
+  the previous tied-parameter, unused-group and prior-information cleanups explicit.
+
 ## 0.3.0 (2026-09-21)
 
 - `log`: ledger of every manifest under a folder — when, which command, which output from
