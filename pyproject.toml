@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "makepst"
-version = "0.4.0"
+version = "0.4.1"
 description = "Build PEST / PEST++ / PEST_HP control files from spreadsheet tables, read them back, and push results into the workbook"
 readme = "README.md"
 license = {text = "MIT"}

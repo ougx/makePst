@@ -81,10 +81,10 @@
   <rect x="40" y="535" width="980" height="160" rx="6" class="manifest"/>
   <text x="60" y="563" text-anchor="start" class="h">Example provenance manifest (excerpt)</text>
   <text x="60" y="586" text-anchor="start" class="s">Written beside each produced file; full JSON also records timestamps, platform, and input roles.</text>
-  <text x="60" y="616" text-anchor="start" class="m">makepst: 0.3.0</text>
+  <text x="60" y="616" text-anchor="start" class="m">makepst: 0.4.0</text>
   <text x="60" y="638" text-anchor="start" class="m">command: build</text>
   <text x="60" y="660" text-anchor="start" class="m">argv: makepst build tr13.pst regul ...</text>
-  <text x="505" y="616" text-anchor="start" class="m">source: tr13.xlsm   sha256: b43fc509eafe...</text>
+  <text x="505" y="616" text-anchor="start" class="m">source: tr13.xlsx   sha256: b43fc509eafe...</text>
   <text x="505" y="638" text-anchor="start" class="m">sheets: 20</text>
   <text x="505" y="660" text-anchor="start" class="m">output: tr13.pst    sha256: 7b9f82a69ab9...</text>
   <text x="505" y="682" text-anchor="start" class="m">dimensions: 1,068 parameters · 41,747 observations</text>
