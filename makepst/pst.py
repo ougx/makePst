@@ -1,12 +1,14 @@
 """The Pst data model: everything a PEST control file holds, as tables.
 
 All routes go through this class: Excel -> Pst -> .pst, .pst -> Pst -> Excel,
-.par -> Pst -> Excel.  `validate()` is the one place that checks consistency
-(duplicate names, tied targets, undefined groups, dangling prior equations).
+.par -> Pst -> Excel. `validate()` audits consistency without changing the tables;
+`normalize()` applies the fixes that the report makes available.
 """
+import fnmatch
 import os
 import re
 import warnings
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -49,6 +51,134 @@ def equation_params(eq):
     return [t for t in _EQ_SPLIT.split(str(eq).lower()) if t and t != 'log' and not is_number(t)]
 
 
+# a whole left-hand side of the form  [coef *] name  or  [coef *] log(name)  - a preferred value, not a relationship
+_ONE_TERM = re.compile(r'^\s*(?:([-+]?[\d.]+(?:[eE][-+]?\d+)?)\s*\*\s*)?(log\s*\(\s*)?([A-Za-z_]\w*)\s*\)?\s*$')
+
+
+def _single_term(eq):
+    """(coefficient, parameter, is_log) for a single-parameter prior equation, else None.
+
+    Multi-parameter equations (preferred difference, homogeneity) state a relationship rather than a value,
+    so nothing can be derived for them from one parameter's value.
+    """
+    lhs, sep, _ = str(eq).partition('=')
+    if not sep:
+        return None
+    m = _ONE_TERM.match(lhs)
+    if not m or (m.group(2) is not None) != (lhs.count('(') == 1):
+        return None
+    return float(m.group(1) or 1.0), m.group(3).lower(), m.group(2) is not None
+
+
+# one term of a prior-equation left-hand side:  [+|-] [coef *] name  or  [+|-] [coef *] log(name)
+_TERM = re.compile(r'\s*([-+])?\s*(?:((?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?)\s*\*\s*)?'
+                   r'(?:(log)\s*\(\s*([^\s()*=+/-]+)\s*\)|([^\s()*=+/-]+))\s*', re.I)
+
+
+def _terms(lhs):
+    """[(sign, coefficient text, name, is_log)] for a prior-equation left-hand side, or None if it does not parse."""
+    pos, out = 0, []
+    while pos < len(lhs):
+        m = _TERM.match(lhs, pos)
+        if not m or m.end() == pos or (out and m.group(1) is None):   # terms are joined by + or -
+            return None
+        sign, coef, is_log, log_name, name = m.groups()
+        out.append((-1.0 if sign == '-' else 1.0, coef, log_name or name, is_log is not None))
+        pos = m.end()
+    return out or None
+
+
+def _rescale_equation(eq, factors):
+    """`eq` rewritten for parameters rescaled as p = f * p' (`factors` maps lower-case names to f).
+
+    Linear terms take the factor into their coefficient; a log term splits into log(p') + log10(f), the
+    constant moving to the right-hand side. Either way the equation's residual is the same number as before,
+    so its weight still means what it did. Returns None when no rescaled parameter appears in it.
+    """
+    lhs, sep, rhs = str(eq).partition('=')
+    terms = _terms(lhs) if sep else None
+    if terms is None or not is_number(rhs.strip()):
+        raise ValueError(f'cannot parse prior equation {eq!r}')
+    if not any(name.lower() in factors for _, _, name, _ in terms):
+        return None
+    shift, size, parts = 0.0, 0.0, []
+    for sign, coef, name, is_log in terms:
+        c = sign * (float(coef.lower().replace('d', 'e')) if coef else 1.0)
+        f = factors.get(name.lower())
+        if f is not None and is_log:
+            shift += c * np.log10(f)
+            size += abs(c * np.log10(f))
+        elif f is not None:
+            c, coef = c * f, None
+        negative = c < 0 or (c == 0 and sign < 0)
+        if not coef:
+            coef = fmt(abs(c))
+            coef += '' if re.search(r'[.eE]', coef) else '.0'      # 1.0, the way equations are written
+        text = f"{coef} * {f'log({name})' if is_log else name}"
+        parts.append(('-' if negative else '') + text if not parts else f"{'-' if negative else '+'} {text}")
+    rhs = rhs.strip()
+    if shift != 0:
+        old = float(rhs.lower().replace('d', 'e'))
+        new = old - shift
+        # log10 round-off after a rescale and its undo, not a real preferred value
+        rhs = fmt(0.0 if abs(new) < 1e-9 * (abs(old) + size) else new)
+    return f"{' '.join(parts)} = {rhs}"
+
+
+def _to_internal(vals, par):
+    """(rows of `par` found in `vals`, their PARVAL1, how many were converted) for read_par's frame `vals`.
+
+    A .par file records the SCALE and OFFSET it was written with. Where those differ from the control file's
+    (a run before `rescale`, say), the value is carried over through the model value PARVAL1 * SCALE + OFFSET,
+    which is what the model saw; copying PARVAL1 across would be off by the ratio of the scales.
+    """
+    num = lambda s: pd.to_numeric(s, errors='coerce')                # noqa: E731
+    names = par['PARNME'].astype(str).str.lower()
+    hit = names.isin(vals.index)
+    value = num(names[hit].map(vals['PARVAL1']))
+    if not {'SCALE', 'OFFSET'} <= set(vals.columns):
+        return hit, value, 0                                        # an IES ensemble carries no scales
+    fs, fo = num(names[hit].map(vals['SCALE'])), num(names[hit].map(vals['OFFSET']))
+    s = num(par.loc[hit, 'SCALE']).fillna(1.0) if 'SCALE' in par else pd.Series(1.0, index=value.index)
+    o = num(par.loc[hit, 'OFFSET']).fillna(0.0) if 'OFFSET' in par else pd.Series(0.0, index=value.index)
+    same = np.isclose(fs, s, rtol=1e-6, atol=0) & np.isclose(fo, o, rtol=1e-6, atol=1e-12 * s.abs())
+    convert = ~same & fs.notna() & fo.notna() & (s != 0)
+    value[convert] = ((value * fs + fo - o) / s)[convert]
+    return hit, value, int(convert.sum())
+
+
+# PEST++ options naming files whose parameter values or sensitivities are in control-file units
+_PARAMETER_UNIT_FILES = ('parcov', 'base_jacobian', 'ies_par_en', 'ies_restart_parameter_ensemble',
+                         'sweep_parameter_csv_file')
+
+
+@dataclass(frozen=True)
+class ValidationFix:
+    """A safe, named normalization available for a Pst validation report."""
+    kind: str
+    description: str
+    items: tuple = ()
+
+    def __str__(self):
+        return self.description
+
+
+@dataclass
+class ValidationReport:
+    """Non-mutating result from :meth:`Pst.validate`."""
+    errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+    fixes_available: list = field(default_factory=list)
+    _owner_id: int = field(default=0, repr=False, compare=False)
+
+    @property
+    def ok(self):
+        return not self.errors
+
+    def __bool__(self):
+        return self.ok
+
+
 class Pst:
     def __init__(self, pestmode='estimation', ss=False):
         self.pestmode = normalize_mode(pestmode)
@@ -64,11 +194,20 @@ class Pst:
         self.ins = []                   # (instruction file, model output file)
         self.cmd = []                   # model command lines
         self.pestpp = []                # (key, value) for ++key(value) lines
-        self.raw_sections = {}          # sections kept verbatim (predictive analysis, pareto)
+        self.pestpp_where = {}          # option name (lower case) -> where each occurrence was read, for messages
+        # Unparsed section bodies, keyed by their normalised section name.  This includes the
+        # four long-standing pass-through sections and any section unknown to this version of
+        # makePst.  The companion metadata lets the writer reproduce an unknown block's exact
+        # header/body lines at the same point in the document.
+        self.raw_sections = {}
+        self.raw_section_headers = {}
+        self.raw_section_positions = {}
+        self.section_order = []
         self.obsgp_order = []           # preferred observation-group order (from a read pst)
         self.obs_cov = {}               # observation group -> covariance matrix file
         self.version = 1                # control file format: 1 classic, 2 PEST++ external tables
-        self._auto_labels = set()       # prior labels generated by validate() from PRIOR/WEIGHT
+        self.eol = '\n'                 # line endings to write back; read_pst sets it from the file
+        self._auto_labels = set()       # prior labels generated by normalize() from PRIOR/WEIGHT
 
     # ------------------------------------------------------------------ counts
     @property
@@ -205,13 +344,16 @@ class Pst:
 
     def add_pp(self, df):
         """PEST++ options from the first two columns (name, value); blank values are skipped."""
-        for r in df.itertuples(index=False):
+        where = df.attrs.get('where')           # 'PP!A{}' or 'pp.csv:{}' from load_table
+        for i, r in enumerate(df.itertuples(index=False)):
             k, v = fmt(r[0]), r[1]
             if not k or fmt(v) == '':
                 continue
             if isinstance(v, (float, np.floating)) and float(v).is_integer():
                 v = int(v)
             self.pestpp.append((k, fmt(v)))
+            if where:
+                self.pestpp_where.setdefault(k.lower(), []).append(where.format(i + 2))
 
     def add_comment(self, table=None, comment=''):
         """Free-text header comments; a one-column table adds a line per cell, wider tables are tabulated."""
@@ -224,33 +366,352 @@ class Pst:
                 self.comments += table_lines(table, header=True)
 
     def fill_parval(self, parfile, real=None):
-        """Replace PARVAL1 with the values in a PEST .par file or a PESTPP-IES ensemble (see read_par)."""
+        """Replace PARVAL1 with the values in a PEST .par file or a PESTPP-IES ensemble (see read_par).
+
+        A .par value written under a different SCALE / OFFSET than this control file's is converted so the
+        model sees the same value (see `rescale_par`); an ensemble carries no scales and is copied as is.
+        """
         vals = read_par(parfile, real)
-        hit = self.par['PARNME'].isin(vals.index)
+        hit, value, converted = _to_internal(vals, self.par)
         missing = self.par.loc[~hit, 'PARNME']
         if len(missing):
             warnings.warn(f'{len(missing)} parameters not in {parfile}: {list(missing[:5])}...')
-        self.par.loc[hit, 'PARVAL1'] = self.par.loc[hit, 'PARNME'].map(vals['PARVAL1']).values
+        if converted:
+            print(f'{converted} values in {parfile} were written with a different SCALE / OFFSET; '
+                  f'converted to this control file\'s so the model sees the same values')
+        self.par.loc[hit, 'PARVAL1'] = value.values
+
+    def set_par(self, changes, sync_ties=True, sync_prior=True):
+        """Set parameter fields on the parameters matched by a glob, keeping ties and prior targets consistent.
+
+        `changes` maps a name pattern to the fields to set, e.g.
+        `{'sycr0*': {'PARVAL1': 0.15, 'PARLBND': 0.08, 'PARUBND': 0.30}, 'getscaler': {'PARVAL1': 14.1}}`.
+        Patterns are fnmatch, matched case-insensitively; a pattern that matches nothing raises.
+
+        Two invariants are easy to break by hand and are maintained here:
+
+        * `sync_ties` - a tied parameter tracks its parent by their value ratio, so moving a parent's PARVAL1
+          should move its children by the same factor. Their bounds are left alone unless the new value would
+          fall outside them, in which case they are scaled too: PEST_HP refuses to start on a tied parameter
+          outside its own bounds, and that is exactly what a parent moved by hand leaves behind.
+        * `sync_prior` - preferred-value regularisation defends a target, not a starting point. A target left
+          behind pulls the parameter back to the old value on the first iteration, silently undoing the edit.
+          Only single-parameter equations are touched; multi-parameter ones (preferred difference, homogeneity)
+          are relationships rather than values and are left alone.
+
+        Returns a dict with the names changed, the tied children rescaled and the prior labels retargeted.
+        """
+        par = self.par
+        num = lambda s: pd.to_numeric(s, errors='coerce')                # noqa: E731  (sections._num is scalar)
+        lower = par['PARNME'].astype(str).str.lower()
+        before = dict(zip(lower, num(par['PARVAL1'])))
+        touched, unknown_cols = [], []
+        for pattern, fields in changes.items():
+            pat = str(pattern).lower()
+            hit = pd.Series([fnmatch.fnmatch(n, pat) for n in lower], index=par.index)
+            if not hit.any():
+                raise ValueError(f'no parameter matches {pattern!r}')
+            for col, value in fields.items():
+                col = col.upper()
+                if col not in par.columns:
+                    if col not in PAR_COLS + PAR_EXTRA:
+                        unknown_cols.append(col)
+                        continue
+                    par[col] = ''
+                par.loc[hit, col] = _num(value) if isinstance(value, str) else value   # csv/CLI gives strings
+            touched += list(lower[hit])
+        if unknown_cols:
+            raise ValueError(f'not parameter columns: {sorted(set(unknown_cols))}')
+        touched = list(dict.fromkeys(touched))
+
+        rescaled = []
+        if sync_ties and 'TIETO' in par and (par['PARTRANS'] == 'tied').any():
+            after = dict(zip(lower, num(par['PARVAL1'])))
+            tied = par['PARTRANS'] == 'tied'
+            tie_to = par['TIETO'].astype(str).str.strip().str.lower()
+            for i in par.index[tied]:
+                parent = tie_to[i]
+                old, new = before.get(parent), after.get(parent)
+                if parent not in touched or not old or old == new or pd.isna(new):
+                    continue
+                factor = new / old
+                val, lo, hi = (num(pd.Series([par.at[i, c]])).iloc[0] for c in ('PARVAL1', 'PARLBND', 'PARUBND'))
+                if pd.isna(val):
+                    continue
+                val *= factor
+                par.at[i, 'PARVAL1'] = val
+                if not pd.isna(lo) and not pd.isna(hi) and not (lo <= val <= hi):
+                    par.at[i, 'PARLBND'], par.at[i, 'PARUBND'] = lo * factor, hi * factor
+                rescaled.append(lower[i])
+
+        retargeted = []
+        if sync_prior and self.nprior:
+            after = dict(zip(lower, num(par['PARVAL1'])))
+            moved = {n for n in touched if before.get(n) != after.get(n)} | set(rescaled)
+            for i in self.prior.index:
+                term = _single_term(self.prior.at[i, 'EQ'])
+                if term is None:
+                    continue
+                coef, name, is_log = term
+                if name not in moved:
+                    continue
+                v = after.get(name)
+                if v is None or pd.isna(v) or (is_log and v <= 0):
+                    continue
+                lhs = str(self.prior.at[i, 'EQ']).split('=', 1)[0].rstrip()
+                self.prior.at[i, 'EQ'] = f'{lhs} = {fmt(coef * (np.log10(v) if is_log else v))}'
+                retargeted.append(str(self.prior.at[i, 'PINME']))
+        return {'parameters': touched, 'tied_rescaled': rescaled, 'prior_retargeted': retargeted}
+
+    def rescale_par(self, patterns=None, groups=None, include_fixed=True, undo=False):
+        """Move each selected parameter's value into its SCALE so it starts at 1, without changing the model.
+
+        PEST applies SCALE and OFFSET only when it writes a model input file: the model gets
+        PARVAL1 * SCALE + OFFSET. A parameter at value v becomes PARVAL1 = 1, SCALE = SCALE * v,
+        bounds / v (swapped when v < 0), OFFSET unchanged, so every model input file is the same as before.
+        `undo=True` folds SCALE back into the value instead (PARVAL1 * SCALE, bounds * SCALE, SCALE = 1).
+
+        Selection: `patterns` (fnmatch globs, case-insensitive) and `groups` (PARGP names); a parameter is
+        selected when it matches every filter given, and all parameters are when neither is. A pattern or
+        group that matches nothing raises. `include_fixed=False` leaves fixed parameters alone. Tied children
+        follow a selected parent, so a tied family ends up consistent.
+
+        Prior information is written in PEST's own units, so equations naming a rescaled parameter are
+        rewritten exactly: linear terms take the factor into the coefficient, log terms move log10(v) to the
+        right-hand side. Each equation's residual is the same number as before, so weights are unchanged.
+        Equations generated from a PRIOR / WEIGHT column are kept as explicit rows (the column cannot express
+        the rewritten form) and those cells are cleared. An equation that cannot be parsed raises before
+        anything is changed.
+
+        Returns a dict: `rescaled` (names), `skipped` ({name: reason}), `prior_rewritten` and `prior_frozen`
+        (labels), and `warnings` for what depends on parameter units but cannot be converted - absolute
+        derivative increments, absolute(n) change limits, and PEST++ / SVD-assist files named in the control
+        file (a covariance matrix, Jacobian or ensemble written for the old values).
+        """
+        par = self.par
+        num = lambda s: pd.to_numeric(s, errors='coerce')                # noqa: E731
+        lower = par['PARNME'].astype(str).str.lower()
+        trans = par['PARTRANS'].astype(str).str.lower()
+        pargp = par['PARGP'].astype(str).str.lower()
+
+        selected = pd.Series(True, index=par.index)
+        if patterns:
+            pats = [str(p).lower() for p in ([patterns] if isinstance(patterns, str) else patterns)]
+            hits = {p: lower.map(lambda n, p=p: fnmatch.fnmatch(n, p)) for p in pats}
+            unmatched = [p for p, h in hits.items() if not h.any()]
+            if unmatched:
+                raise ValueError(f'no parameter matches {unmatched}')
+            selected &= pd.concat(hits.values(), axis=1).any(axis=1)
+        if groups:
+            want = {str(g).strip().lower() for g in ([groups] if isinstance(groups, str) else groups)}
+            unknown = sorted(want - set(pargp))
+            if unknown:
+                raise ValueError(f'no parameter in groups {unknown}')
+            selected &= pargp.isin(want)
+        if not include_fixed:
+            selected &= trans != 'fixed'
+        if 'TIETO' in par:
+            parent = par['TIETO'].astype(str).str.strip().str.lower()
+            selected |= (trans == 'tied') & parent.isin(set(lower[selected]))
+
+        val = num(par['PARVAL1'])
+        scale = num(par['SCALE']).fillna(1.0) if 'SCALE' in par else pd.Series(1.0, index=par.index)
+        factors, skipped = {}, {}
+        for i in par.index[selected]:
+            f = 1.0 / scale[i] if undo else val[i]
+            if pd.isna(val[i]) or pd.isna(f):
+                skipped[lower[i]] = 'value is not a number'
+            elif f == 0:
+                skipped[lower[i]] = 'PARVAL1 is zero'
+            elif trans[i] == 'log' and f < 0:
+                skipped[lower[i]] = 'log-transformed with a negative factor'
+            elif f != 1:
+                factors[lower[i]] = f
+
+        # PRIOR / WEIGHT generated rows cannot carry the rewritten form: keep them as explicit rows
+        frozen, auto = [], None
+        if 'PRIOR' in par and 'WEIGHT' in par and self.pestmode == 'regularisation':
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                auto = self._auto_prior()
+            auto = auto[auto['EQ'].map(lambda eq: any(p in factors for p in equation_params(eq))).astype(bool)]
+        prior = self.prior.copy()
+        if auto is not None and len(auto):
+            new = auto[~auto['PINME'].isin(set(prior['PINME']))]
+            prior = _append(prior, new) if len(new) else prior
+            frozen = list(auto['PINME'])
+
+        rewritten = []                     # everything is computed before anything changes
+        for i in prior.index:
+            eq = _rescale_equation(prior.at[i, 'EQ'], factors)
+            if eq is not None:
+                prior.at[i, 'EQ'] = eq
+                rewritten.append(str(prior.at[i, 'PINME']))
+
+        idx = par.index[lower.isin(factors)]
+        f = lower[idx].map(factors)
+        lo, hi = num(par.loc[idx, 'PARLBND']) / f, num(par.loc[idx, 'PARUBND']) / f
+        flip = f < 0
+        if 'SCALE' not in par:
+            par['SCALE'] = 1.0
+        for c in ('PARVAL1', 'SCALE', 'PARLBND', 'PARUBND'):
+            if pd.api.types.is_numeric_dtype(par[c]):
+                par[c] = par[c].astype(float)             # SCALE reads as int; it takes floats now
+        par.loc[idx, 'PARVAL1'] = (val[idx] * scale[idx]) if undo else 1.0
+        par.loc[idx, 'SCALE'] = 1.0 if undo else scale[idx] * f
+        par.loc[idx, 'PARLBND'] = lo.where(~flip, hi)
+        par.loc[idx, 'PARUBND'] = hi.where(~flip, lo)
+        if frozen:
+            owner = lower.isin(frozen)
+            par.loc[owner, ['PRIOR', 'WEIGHT']] = None
+            self._auto_labels -= set(frozen)
+        self.prior = prior
+
+        notes = []
+        moved = idx[trans[idx].isin(ADJUSTABLE)]
+        if len(moved) and len(self.pargp):
+            gp = self.pargp.assign(key=self.pargp['PARGPNME'].astype(str).str.lower()).set_index('key')
+            for g in dict.fromkeys(pargp[moved]):
+                if g not in gp.index:
+                    continue
+                what = []
+                if str(gp.at[g, 'INCTYP']).strip().lower() == 'absolute':
+                    what.append(f"INCTYP absolute (DERINC {fmt(gp.at[g, 'DERINC'])})")
+                if 'DERINCLB' in gp and (num(pd.Series([gp.at[g, 'DERINCLB']])).fillna(0) > 0).iloc[0]:
+                    what.append(f"DERINCLB {fmt(gp.at[g, 'DERINCLB'])}")
+                if what:
+                    names = list(lower[moved][pargp[moved] == g])
+                    notes.append(f"parameter group {g}: {' and '.join(what)} is in parameter units and was not "
+                                 f"rescaled; it now applies to {len(names)} rescaled parameters: {names[:5]}")
+        absolute = list(lower[moved][par.loc[moved, 'PARCHGLIM'].astype(str).str.lower().str.startswith('absolute')])
+        if absolute:
+            notes.append(f'absolute(n) change limits are in parameter units and were not rescaled: {absolute[:5]}')
+        if factors:
+            from .pestpp import canonical
+            named = sorted({canonical(k) for k, _ in self.pestpp} & set(_PARAMETER_UNIT_FILES))
+            named += [k for k in ('basepestfile', 'basejacfile') if fmt(self.control.get(k))]
+            if named:
+                notes.append(f'{", ".join(named)} name files written for the old parameter values; '
+                             f'they no longer match the rescaled parameters')
+        return {'rescaled': list(lower[idx]), 'skipped': skipped, 'prior_rewritten': rewritten,
+                'prior_frozen': frozen, 'warnings': notes}
 
     # ------------------------------------------------------------------ validation
     def validate(self):
-        """Make the tables mutually consistent; raise on anything PEST would reject."""
-        if self.npar == 0:
-            raise ValueError('no parameters; add parameter data first')
-        if self.nobs == 0:
-            raise ValueError('no observations; add observation data first')
-        for name, col in (('parameter', self.par['PARNME']), ('observation', self.obs['OBSNME'])):
-            dup = col[col.duplicated()].unique()
-            if len(dup):
-                raise ValueError(f'duplicate {name} names: {list(dup[:10])}')
-        self._resolve_tied()
-        self._filter_pargp()
-        self._build_prior()
-        self._check_bounds()
-        if not self.tpl or not self.ins:
-            raise ValueError('need at least one template and one instruction file')
-        if not self.cmd:
-            raise ValueError('model command line not set')
+        """Audit this model without changing it; return errors, warnings and available fixes."""
+        # Reuse the same pure table and pestchek-style checks as ``makepst validate``.
+        # Imports are local because checks/rules also use the Pst type and writer helpers.
+        from .checks import Finding, check_tables
+        from .rules import check_extra
+
+        findings = check_tables(self) + check_extra(self)
+        # PEST rejects a starting value outside its bounds, so `makepst validate` calls it an error; a
+        # control file carrying one (parrep from an IES realization, say) is still worth writing
+        for f in findings:
+            if f.severity == 'error' and f.message.startswith('adjustable PARVAL1 outside bounds'):
+                f.severity = 'warning'
+        report = ValidationReport(
+            errors=[f for f in findings if f.severity == 'error'],
+            warnings=[f for f in findings if f.severity in ('warning', 'info')],
+            _owner_id=id(self),
+        )
+
+        used = set(self.par['PARGP'])
+        unused = tuple(self.pargp.loc[~self.pargp['PARGPNME'].isin(used), 'PARGPNME'].tolist())
+        if unused:
+            report.fixes_available.append(ValidationFix(
+                'unused_parameter_groups', 'Remove unused parameter groups', unused))
+
+        if 'TIETO' in self.par:
+            trans = self.par.set_index('PARNME')['PARTRANS']
+            tied = self.par['PARTRANS'].eq('tied')
+            targets = self.par.loc[tied, 'TIETO'].astype(str).str.strip().str.lower().map(trans)
+            fixed = tuple(self.par.loc[tied].loc[targets.eq('fixed').values, 'PARNME'].tolist())
+            if fixed:
+                report.fixes_available.append(ValidationFix(
+                    'tied_to_fixed', 'Convert parameters tied to fixed parameters to fixed', fixed))
+
+        prior_rows = []
+        if self.nprior:
+            adjustable = set(self.par.loc[self.par['PARTRANS'].isin(ADJUSTABLE), 'PARNME'])
+            for row in self.prior.itertuples():
+                refs = equation_params(str(row.EQ))
+                if any(name not in adjustable for name in refs):
+                    prior_rows.append(str(row.PINME))
+        generate_auto = False
+        if self.pestmode == 'regularisation' and {'PRIOR', 'WEIGHT'} <= set(self.par):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                expected = self._auto_prior()
+            report.warnings.extend(Finding('warning', 'prior information', str(w.message)) for w in caught)
+            current = self.prior[self.prior['PINME'].isin(self._auto_labels)]
+            manual = self.prior[~self.prior['PINME'].isin(self._auto_labels)]
+            collisions = tuple(sorted(set(expected['PINME']) & set(manual['PINME'])))
+            if collisions:
+                report.errors.append(Finding(
+                    'error', 'prior information',
+                    f'generated prior labels already exist as explicit rows: {list(collisions[:5])}'))
+            signature = lambda df: sorted(tuple(fmt(row[c]) for c in PRIOR_COLS)
+                                          for _, row in df[PRIOR_COLS].iterrows())
+            generate_auto = not collisions and signature(current) != signature(expected)
+            if generate_auto:
+                report.errors.append(Finding(
+                    'error', 'prior information',
+                    'regularisation prior rows from parameter PRIOR/WEIGHT fields have not been generated; '
+                    'call normalize() or apply the prior_information fix'))
+        if prior_rows or generate_auto:
+            details = tuple(dict.fromkeys(prior_rows))
+            desc = 'Rebuild prior information from parameter PRIOR/WEIGHT fields and remove equations with non-adjustable or missing references'
+            report.fixes_available.append(ValidationFix('prior_information', desc, details))
+            if prior_rows:
+                report.errors.append(Finding(
+                    'error', 'prior information',
+                    f'references fixed, tied or missing parameters: {list(details[:5])}'))
+        if any(f.kind == 'tied_to_fixed' for f in report.fixes_available):
+            fixed = next(f.items for f in report.fixes_available if f.kind == 'tied_to_fixed')
+            report.errors.append(Finding(
+                'error', 'parameters', f'tied parameters have fixed targets: {list(fixed[:5])}'))
+        return report
+
+    def apply_fixes(self, report=None):
+        """Apply the fixes listed by a validation report and return a fresh report.
+
+        Fixes are opt-in. Pass the report you reviewed, or omit it to validate immediately
+        before applying. Structural errors such as missing groups and invalid tie chains are
+        left for the caller to correct; independent fixes can still be applied safely.
+        """
+        if report is None:
+            report = self.validate()
+        if report._owner_id != id(self):
+            raise ValueError('validation report belongs to a different Pst instance')
+        available_now = {fix.kind for fix in self.validate().fixes_available}
+        kinds = {fix.kind for fix in report.fixes_available} & available_now
+        if 'tied_to_fixed' in kinds and 'TIETO' in self.par:
+            trans = self.par.set_index('PARNME')['PARTRANS']
+            tied = self.par['PARTRANS'].eq('tied')
+            targets = self.par.loc[tied, 'TIETO'].astype(str).str.strip().str.lower().map(trans)
+            self.par.loc[tied & targets.reindex(self.par.index).eq('fixed').fillna(False), 'PARTRANS'] = 'fixed'
+        if 'unused_parameter_groups' in kinds:
+            used = set(self.par['PARGP'])
+            defined = set(self.pargp['PARGPNME'])
+            if used <= defined:
+                self._filter_pargp()
+        if 'prior_information' in kinds:
+            # Duplicate labels are ambiguous, so leave that table untouched for manual repair.
+            if not self.prior['PINME'].duplicated().any():
+                can_rebuild = True
+                if self.pestmode == 'regularisation' and {'PRIOR', 'WEIGHT'} <= set(self.par):
+                    expected = self._auto_prior()
+                    manual = self.prior[~self.prior['PINME'].isin(self._auto_labels)]
+                    can_rebuild = not (set(expected['PINME']) & set(manual['PINME']))
+                if can_rebuild:
+                    self._build_prior()
+        return self.validate()
+
+    def normalize(self):
+        """Apply currently available safe fixes, then return this Pst for chaining."""
+        report = self.validate()
+        self.apply_fixes(report)
         return self
 
     def _check_bounds(self):

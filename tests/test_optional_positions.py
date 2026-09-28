@@ -57,7 +57,7 @@ def test_different_value_and_missing_field_names_use_same_rule():
 def test_named_tokens_and_flags_do_not_require_positional_fillers():
     pst = read_pst(DATA / 'demo.pst')
     pst.set_control({'absparmax': 'absparmax(1)=0.25 absparmax(2)=30',
-                     'uptestlim': 8, 'doaui': 'noaui', 'regcontinue': 'regcontinue'})
+                     'uptestlim': 80, 'doaui': 'noaui', 'regcontinue': 'regcontinue'})
     reread = from_text(to_text(pst))
     for field in ('absparmax', 'uptestlim', 'doaui', 'regcontinue'):
         assert reread.control[field] == pst.control[field]

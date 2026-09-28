@@ -126,8 +126,10 @@ def test_missing_group_is_an_error(tmp_path):
     p = Pst('regul')
     p.add_par(load_table(f'{BOOK},PAR_HK'))
     p.add_obs(load_table(f'{BOOK},OBS_HEAD'))
-    with pytest.raises(ValueError, match='without a definition'):
-        p.validate()
+    assert any('used but not defined' in str(f) for f in p.validate().errors)
+    with pytest.raises(ValueError, match='used but not defined'):
+        p.normalize()                                             # nothing normalize can fix
+        to_text(p)
 
 
 # ---------------------------------------------------------------------- dump

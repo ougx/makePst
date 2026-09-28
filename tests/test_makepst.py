@@ -68,7 +68,8 @@ def small_pst(mode='estimation'):
 
 def test_write_read_small():
     p = small_pst('regul')
-    text = to_text(p)
+    p.par.loc[3, 'PARTRANS'] = 'log'            # k4 = k1 needs both in log(), as k1 is log-transformed
+    text = to_text(p.normalize())
     q = from_text(text)
     assert q.pestmode == 'regularisation' and q.comments == ['hello']
     assert list(q.par['PARNME']) == ['k1', 'k2', 'k3', 'k4']
@@ -77,7 +78,7 @@ def test_write_read_small():
     assert list(q.pargp['PARGPNME']) == ['hk']                       # unused group dropped
     assert q.obsgp == ['g', 'h', 'regulhk']                          # prior groups listed
     assert q.pestpp == [('lambdas', '0.1,1,10'), ('n', '3')]
-    assert list(q.prior['EQ']) == ['1.0 * log(k1) = 0.30102999566', '1.0 * k4 - 1.0 * k1 = 0']
+    assert list(q.prior['EQ']) == ['1.0 * log(k1) = 0.30102999566', '1.0 * log(k4) - 1.0 * log(k1) = 0']
     assert to_text(q) == text
 
 
@@ -112,34 +113,57 @@ def test_estimation_mode_ignores_prior_columns():
     assert 'prior information' not in to_text(p) and p.nprior == 0
 
 
+def _errors(p):
+    return '\n'.join(str(f) for f in p.validate().errors)
+
+
 def test_validate_errors():
     p = small_pst()
     p.par.loc[1, 'TIETO'] = 'nope'
-    with pytest.raises(ValueError, match='target is missing'):
-        p.validate()
+    assert 'tied to a parameter that does not exist: k2' in _errors(p)
+    with pytest.raises(ValueError, match='does not exist'):
+        to_text(p)
     p = small_pst()
     p.par.loc[3, 'PARGP'] = 'ghost'
-    with pytest.raises(ValueError, match='without a definition'):
-        p.validate()
+    assert 'used but not defined: ghost' in _errors(p)
     p = small_pst()
     p.add_obs(pd.DataFrame({'OBSNME': ['o1'], 'OBSVAL': [1], 'WEIGHT': [1], 'OBGNME': ['g']}))
-    with pytest.raises(ValueError, match='duplicate observation'):
-        p.validate()
+    assert 'observations: duplicate names: o1' in _errors(p)
+
+
+def test_validate_does_not_change_the_tables():
+    p = small_pst()
+    p.par.loc[1, 'TIETO'] = 'k3'
+    before = p.par.copy()
+    report = p.validate()
+    pd.testing.assert_frame_equal(p.par, before)
+    assert [f.kind for f in report.fixes_available if f.kind == 'tied_to_fixed'] == ['tied_to_fixed']
 
 
 def test_tied_to_fixed_becomes_fixed(capsys):
     p = small_pst()
     p.par.loc[1, 'TIETO'] = 'k3'
-    p.validate()
+    assert 'tied parameters have fixed targets' in _errors(p)
+    p.normalize()
     assert p.par.loc[1, 'PARTRANS'] == 'fixed'
 
 
 def test_dangling_prior_dropped(capsys):
     p = small_pst('regul')
     p.add_prior(pd.DataFrame({'PINME': ['bad'], 'EQ': ['1.0 * log(k3) = 1'], 'WEIGHT': [1], 'OBGNME': ['r']}))
-    p.validate()
+    assert "references fixed, tied or missing parameters: ['bad']" in _errors(p)
+    p.normalize()
     assert 'bad' not in set(p.prior['PINME'])
     assert 'fixed, tied or missing' in capsys.readouterr().out
+
+
+def test_out_of_bounds_is_a_warning_and_still_written():
+    p = small_pst()
+    p.par.loc[0, 'PARVAL1'] = 100
+    report = p.validate()
+    assert report.ok and any('outside bounds: k1' in str(f) for f in report.warnings)
+    with pytest.warns(UserWarning, match='outside their bounds'):
+        assert 'k1' in to_text(p)
 
 
 def test_control_sheet_and_computed_ignored():

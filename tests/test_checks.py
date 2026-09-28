@@ -11,8 +11,8 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from makepst import from_text, read_pst, write_pst  # noqa: E402
-from makepst.checks import (InstructionError, check_files, check_tables, instruction_names,  # noqa: E402
-                            run_instructions, template_names)
+from makepst.checks import (InstructionError, check_files, check_sections, check_tables,  # noqa: E402
+                            instruction_names, run_instructions, template_names)
 from makepst.cli import main  # noqa: E402
 from make_fixture import BOOK, PST  # noqa: E402
 
@@ -92,6 +92,14 @@ def test_validate_workbook_target(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert 'template file not found' in out
     assert 'cited in no template' not in out             # no template readable: name check not meaningful
+
+
+def test_unknown_section_is_informational_because_it_is_preserved(tmp_path):
+    path = tmp_path / 'future.pst'
+    path.write_text('pcf\n* future section\nopaque data\n')
+    findings = check_sections(path)
+    assert [(f.severity, f.message) for f in findings] == [
+        ('info', 'unknown section preserved verbatim: * future section')]
 
 
 # ---------------------------------------------------------------------- tables

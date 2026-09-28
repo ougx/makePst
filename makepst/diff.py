@@ -45,18 +45,29 @@ class Diff:
         return '; '.join(parts) if parts else 'no differences'
 
     def to_text(self, max_rows=50):
+        """The differences as text; `None` prints every row, `0` prints counts by kind and column.
+
+        A bulk edit - new bounds across a parameter family, a weight rebalance - runs to hundreds of rows,
+        where all the reader wants is confirmation that nothing unexpected moved.
+        """
         out = []
         for t in self.tables:
             df = getattr(self, t)
             if not len(df):
                 continue
             out.append(f'== {t} ({len(df)})')
-            show = df.head(max_rows).astype(str)
+            if max_rows == 0:
+                keys = [c for c in ('change', 'column') if c in df.columns]
+                for key, n in (df.groupby(keys).size().items() if keys else []):
+                    label = ' '.join(str(k) for k in key) if isinstance(key, tuple) else str(key)
+                    out.append(f'   {label}: {n}')
+                continue
+            show = (df if max_rows is None else df.head(max_rows)).astype(str)
             widths = [max(len(c), show[c].str.len().max()) for c in show.columns]
             out.append('  '.join(f'{c:<{w}}' for c, w in zip(show.columns, widths)))
             for row in show.itertuples(index=False):
                 out.append('  '.join(f'{v:<{w}}' for v, w in zip(row, widths)))
-            if len(df) > max_rows:
+            if max_rows is not None and len(df) > max_rows:
                 out.append(f'... {len(df) - max_rows} more')
         return '\n'.join(out) if out else 'no differences'
 
@@ -132,10 +143,46 @@ def _tie_only_when_tied(par):
     return par
 
 
+def _tie_scale_diff(old, new, rtol):
+    """Compare tied parameters' PARVAL1 ratio to their tied-to parameter."""
+    def ratios(par):
+        if 'TIETO' not in par:
+            return {}
+        indexed = par.set_index(par['PARNME'].astype(str).str.lower(), drop=False)
+        result = {}
+        for row in par.loc[par['PARTRANS'].astype(str).str.lower() == 'tied'].itertuples(index=False):
+            name = str(row.PARNME)
+            parent_name = str(row.TIETO).strip()
+            parent = indexed.loc[parent_name.lower()] if parent_name.lower() in indexed.index else None
+            if parent is None or isinstance(parent, pd.DataFrame):
+                continue
+            try:
+                child_value = float(row.PARVAL1)
+                parent_value = float(parent['PARVAL1'])
+                if not np.isfinite(child_value) or not np.isfinite(parent_value) or parent_value == 0:
+                    continue
+                result[name.lower()] = (name, parent_name.lower(), child_value / parent_value)
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    before, after = ratios(old), ratios(new)
+    rows = []
+    for key in sorted(before.keys() & after.keys()):
+        old_name, old_parent, old_ratio = before[key]
+        new_name, new_parent, new_ratio = after[key]
+        if old_parent != new_parent:
+            continue  # TIETO itself is reported by the ordinary parameter diff.
+        if not _same(old_ratio, new_ratio, rtol):
+            rows.append((new_name, 'changed', 'tied factor', fmt(old_ratio), fmt(new_ratio)))
+    return pd.DataFrame(rows, columns=['PARNME', 'change', 'column', 'old', 'new'])
+
+
 def compare(old: Pst, new: Pst, rtol=1e-9):
     """Differences from `old` to `new`, as a Diff."""
     d = Diff()
     d.par = _table_diff(_tie_only_when_tied(old.par), _tie_only_when_tied(new.par), 'PARNME', PAR_COMPARE, rtol)
+    d.par = pd.concat([d.par, _tie_scale_diff(old.par, new.par, rtol)], ignore_index=True)
     d.obs = _table_diff(old.obs, new.obs, 'OBSNME', [c for c in OBS_COLS if c != 'OBSNME'], rtol)
     d.prior = _table_diff(old.prior, new.prior, 'PINME', [c for c in PRIOR_COLS if c != 'PINME'], rtol)
     d.pargp = _table_diff(old.pargp, new.pargp, 'PARGPNME',

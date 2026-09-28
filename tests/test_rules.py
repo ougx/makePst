@@ -141,6 +141,24 @@ def test_control_rules():
     assert has(check_control(p), 'NOPTMAX is 0', 'warning')
 
 
+def test_tied_parval_outside_its_own_bounds():
+    """PEST_HP refuses to start on this, and it is exactly what a parent moved by hand leaves behind."""
+    p = fixture()
+    i = list(p.par['PARNME']).index('hk1_cc02')                  # tied to hk1_cc01
+    assert not has(check_parameters(p), 'tied PARVAL1 outside its own bounds')
+    p.par.loc[i, 'PARVAL1'] = 5000.0                             # its bounds are 1 - 300
+    assert has(check_parameters(p), 'tied PARVAL1 outside its own bounds')
+    p.par.loc[i, 'PARUBND'] = 6000.0                             # bounds rescaled with it: quiet again
+    assert not has(check_parameters(p), 'tied PARVAL1 outside its own bounds')
+
+
+def test_version_sensitive_pestpp_option():
+    p = fixture()
+    assert not has(check_control(p), 'not accepted by every PEST++ build', 'info')
+    p.pestpp.append(('glm_hp_lambdas', 'true'))
+    assert has(check_control(p), '++glm_hp_lambdas is not accepted by every PEST++ build', 'info')
+
+
 def test_pest_hp_variables_and_memory_warning():
     p = fixture()
     assert has(check_control(p), 'PEST_HP-only variables (plain PEST needs /hpstart): WIN_MRUN_HOURS, RRFSAVE, UPTESTMIN', 'info')

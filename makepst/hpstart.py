@@ -8,7 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from .pst import read_obs_ensemble, read_par, read_res
+from .pst import _to_internal, read_obs_ensemble, read_par, read_res
 
 
 def _values(frame, names, column, source):
@@ -57,7 +57,9 @@ def write_hpstart(pst, template, output, *, res=None, obs_csv=None, real=None, p
     start = 12 + 8 * int(npar)
     raw[start:start + 8 * int(nobs)] = modeled.tobytes()
     if par is not None:
-        parameters = _values(read_par(par, real), pst.par['PARNME'], 'PARVAL1', par)
+        frame = read_par(par, real)
+        _values(frame, pst.par['PARNME'], 'PARVAL1', par)           # names and numbers are all there
+        parameters = _to_internal(frame, pst.par)[1].to_numpy(dtype='<f8')   # through SCALE / OFFSET
         raw[12:start] = parameters.tobytes()
     with open(output, 'wb') as f:
         f.write(raw)

@@ -14,8 +14,10 @@ reads control files back into editable workbooks, and returns calibration result
 Excel / CSV tables                     ->  .pst                   makepst build
 .pst                                   ->  editable workbook      makepst dump
 .par / .res / .rei / IES ensemble      ->  existing workbook      makepst update
-    .par or IES realization (+ tweaks)     ->  new .pst               makepst parrep
-    .res/.rei or IES obs + existing .hp     ->  new .hp                makepst hpstart
+.par or IES realization (+ tweaks)     ->  new .pst               makepst parrep
+.pst                                   ->  values moved to SCALE  makepst rescale
+.res/.rei or IES obs + group targets   ->  reweighted .pst        makepst reweight
+.res/.rei or IES obs + existing .hp    ->  new .hp                makepst hpstart
 two .pst / workbooks                   ->  what changed           makepst diff
 manifests in a folder                  ->  run ledger             makepst log
 .pst + everything it references        ->  zip for review         makepst bundle
@@ -127,7 +129,7 @@ without `--force`.
 
 ```
 makepst validate model.pst --outputs
-makepst validate book.xlsm --strict
+makepst validate book.xlsx --strict
 ```
 
 See [Validation](#validation). Template and instruction paths are resolved the way PEST
@@ -136,26 +138,42 @@ the current directory and the control file's parent, uses the one where the file
 says which; `--base_dir` overrides that. `--strict` also fails on warnings,
 `--quiet` hides the informational lines.
 
+A workbook is accepted in place of a control file when it carries a `BUILD` sheet (one that
+`dump` or `init` wrote), which is built first and then checked. For tables that have no
+`BUILD` sheet — a hand-made workbook, or a set of CSV files — name them on a
+[`build`](#build--tables--pst) command line and add `--dry_run`, which runs this same report
+and writes nothing.
+
 ### build — tables → .pst
 
 ```
 makepst build out.pst [estimation|regularisation|prediction|pareto]
-    --set_ctl_xls book.xlsm,CONTROL          (or --set_ctl_csv file.csv)
-    --add_pargp_xls book.xlsm,PARGP
-    --add_par_xls   book.xlsm,PAR_*          (repeatable; sheet names may be globs)
-    --add_obs_xls   book.xlsm,OBS_*
-    --add_io_xls    book.xlsm,IO  --add_pp_xls book.xlsm,PPcntl
+    --set_ctl_xls book.xlsx,CONTROL          (or --set_ctl_csv file.csv)
+    --add_pargp_xls book.xlsx,PARGP
+    --add_par_xls   book.xlsx,PAR_*          (repeatable; sheet names may be globs)
+    --add_obs_xls   book.xlsx,OBS_*
+    --add_io_xls    book.xlsx,IO  --add_pp_xls book.xlsx,PPcntl
     [--add_tied_xls ...] [--add_prior_xls ...] [--add_comment "text"] [--add_comment_xls ...]
     [--fill_parval run.par [--real NAME]] [--ss] [--no_dump_tpl] [--v2]
 ```
 
 Each `--add_*` takes `book,SHEET` (`_xls`) or a csv path (`_csv`) and may be repeated;
 tables split across sheets are concatenated. The sheet name may be a glob:
-`--add_par_xls tr13.xlsm,PAR_*` adds every `PAR_…` sheet in workbook order. Headers are
-case-insensitive. `makepst build book.xlsm [--out x.pst]` runs the command stored in the
+`--add_par_xls tr13.xlsx,PAR_*` adds every `PAR_…` sheet in workbook order. Headers are
+case-insensitive. `makepst build book.xlsx [--out x.pst]` runs the command stored in the
 workbook's `BUILD` sheet instead. The mode argument
 overrides `pestmode` in the CONTROL sheet; adding prior information switches to regularisation.
 `--ss` drops `ss*`/`sy*` parameters and groups (steady-state runs of a transient setup).
+
+`--dry_run` builds the control file in memory, runs the full [validation](#validation) report
+on it — including the template, instruction and model files it references — and writes
+nothing (no `.pst`, no `dump.tpl`, no manifest), exiting 1 when there are errors. This is how
+to check a workbook or a set of CSV tables that has no `BUILD` sheet; for one that has a
+`BUILD` sheet, `makepst validate book.xlsx` does the same in one argument.
+
+```bash
+makepst build case.pst --add_par_xls book.xlsx,PAR_* --add_obs_xls book.xlsx,OBS_* ... --dry_run
+```
 
 | table   | columns |
 |---------|---------|
@@ -199,13 +217,13 @@ to recover a workbook that was lost.
 ### update — results → existing workbook
 
 ```
-makepst update book.xlsm --par run.par                          # PARVAL1
-makepst update book.xlsm --res run.res                          # adds MODELLED / RESIDUAL
-makepst update book.xlsm --pst run.pst --par_cols PARVAL1,PARTRANS,PARLBND,PARUBND
-makepst update book.xlsm --par run.3.par.csv --real best        # PESTPP-IES ensemble
-makepst update book.xlsm --obs_csv run.3.obs.csv --pst run.pst  # IES simulated values
-makepst update book.xlsm --par run.par --dry_run               # preview; write nothing
-    [--sheet "PAR_*"] [--group hk,sy] [--overwrite_formulas] [--out copy.xlsm] [--backend openpyxl|xlwings]
+makepst update book.xlsx --par run.par                          # PARVAL1
+makepst update book.xlsx --res run.res                          # adds MODELLED / RESIDUAL
+makepst update book.xlsx --pst run.pst --par_cols PARVAL1,PARTRANS,PARLBND,PARUBND
+makepst update book.xlsx --par run.3.par.csv --real best        # PESTPP-IES ensemble
+makepst update book.xlsx --obs_csv run.3.obs.csv --pst run.pst  # IES simulated values
+makepst update book.xlsx --par run.par --dry_run               # preview; write nothing
+    [--sheet "PAR_*"] [--group hk,sy] [--overwrite_formulas] [--out copy.xlsx] [--backend openpyxl|xlwings]
 ```
 
 > **`update` saves in place unless `--out` is given.** Use `--out` the first time, and keep
@@ -252,18 +270,67 @@ unmatched names without saving a workbook or manifest. It does not test whether 
 refuse individual writes. During `build`, missing cached formula results in referenced
 tables produce a warning; existing cached values may still be stale and cannot be verified.
 
+### reweight — balance observation-group weights
+
+```
+makepst reweight run.pst balanced.pst --res run.res --equal
+makepst reweight run.pst balanced.pst --res run.res --targets group_shares.csv
+makepst reweight run.pst scaled.pst --factor heads=0.5 --factor flow=2
+makepst reweight run.pst balanced.pst --obs_csv run.3.obs.csv --real base --equal
+makepst reweight run.pst adjusted.pst --res run.res --discrepancy group
+makepst reweight run.pst adjusted.pst --obs_csv run.0.obs.csv --discrepancy obs
+```
+
+`reweight` writes a new control file; it never overwrites the input. `--equal` gives each
+eligible measurement group the same initial objective-function contribution; a group whose
+current phi is zero cannot be scaled to a share, so it is skipped with an INFO line and its
+weights are left unchanged. `--targets`
+reads a CSV or `BOOK,SHEET` table with `OBGNME,TARGET_SHARE` columns. Shares are relative, so
+`4,3,2` means 44.44%, 33.33% and 22.22%; the selected groups' total phi is preserved. Direct
+`--factor GROUP=NUMBER` specifications multiply the existing positive weights in named groups.
+
+`--discrepancy` makes weights consistent with the current misfit, so that each weighted
+observation contributes about 1 to phi. `--discrepancy group` scales each measurement group by
+one factor so its phi equals its number of weighted observations (as PEST's PWTADJ2); relative
+weights inside a group are kept and zero-phi groups are skipped. It raises the weights of groups
+that already fit better than that, so pair it with `--clip` when some groups fit very closely.
+`--discrepancy obs` sets `w = min(w, 1/|residual|)` for each observation (pyEMU's
+`adjust_weights_discrepancy` with its original ceiling): observations the model cannot fit are
+lowered to a contribution of 1, weights are never raised, and zero residuals keep their weight.
+It is commonly applied to the prior mean or base realization before a PESTPP-IES run so that
+observation noise is not smaller than the misfit the prior can reach. Total phi is not preserved
+in either variant.
+
+For equal, target and discrepancy modes, residuals are joined by observation name while weights and group
+membership come from the input control file. Groups backed by covariance matrices, `predict`,
+and `regul*` groups are not measurement groups and are rejected or skipped as appropriate.
+
+Use `--clip MIN MAX` to constrain final positive weights, for example `--clip 0 10`. Original
+zero weights remain zero. Clipping is included in the balancing calculation; if a requested
+target cannot be reached under the bounds, the command fails instead of reporting a misleading
+result. `--report FILE` writes the before/after group table, including phi, percentages,
+factors, clipping counts and the number of weights lowered (`N_REDUCED`). `--dry_run` prints that table without writing a control file,
+report or manifest.
+
+The workbook remains the source of truth. If the control file is rebuilt from a workbook later,
+formula-generated workbook weights will replace weights changed by `reweight` unless the change
+is deliberately transferred back to the workbook.
+
 ### parrep — .par values → new .pst
 
 ```
 makepst parrep run.pst run.par next.pst [--set noptmax=0] [--set NAME=VALUE ...] [--v1|--v2]
 makepst parrep run.pst run.3.par.csv next.pst --real best
-makepst parrep book.xlsm run.par next.pst                       # base is the workbook
+makepst parrep book.xlsx run.par next.pst                       # base is the workbook
 ```
 
 Like PEST's PARREP: `PARVAL1` is replaced from a `.par` file or an IES realization and a new
 control file is written; `--set` changes control values on the way. All supported content of
 the input control file is preserved semantically (see below); adjustable parameters that end
-up outside their bounds are reported.
+up outside their bounds are reported. A `.par` file records the `SCALE` and `OFFSET` each value
+was written with; where those differ from the control file's (a run from before a
+[`rescale`](#rescale--parameter-values--scale)), the value is converted so the model sees the
+same number (`PARVAL1 × SCALE + OFFSET`). An IES ensemble carries no scales and is copied as is.
 
 With a **workbook** as the base, the control file is first built from the command in the
 workbook's `BUILD` sheet (`dump` writes one; for a hand-made workbook paste the build command
@@ -271,6 +338,37 @@ into column A, one option per row). File names in it that match the workbook's o
 to that workbook; other relative names resolve against the workbook's folder. Note that this
 route rebuilds from the workbook's *current* state, so any edits made since the original
 control file was written are picked up too.
+
+### rescale — parameter values → SCALE
+
+```
+makepst rescale run.pst run_unit.pst                            # every parameter starts at 1
+makepst rescale run.pst run_unit.pst --par "hk*,sy*" --exclude_fixed
+makepst rescale run.pst run_unit.pst --pargp kh --pargp kv
+makepst rescale run_unit.pst run_back.pst --undo                # SCALE folded back into PARVAL1
+```
+
+PEST applies `SCALE` and `OFFSET` only when it writes a model input file, so a parameter at
+value *v* can start at 1 without the model seeing any difference: `PARVAL1 = 1`,
+`SCALE = SCALE × v`, bounds divided by *v* (swapped when *v* < 0), `OFFSET` unchanged. `--undo`
+does the reverse (`PARVAL1 × SCALE`, bounds likewise, `SCALE = 1`).
+
+- **Selection:** all parameters by default, fixed ones included; `--par` (names or globs) and
+  `--pargp` narrow it, and both must match when both are given; `--exclude_fixed` leaves fixed
+  parameters alone. Tied children follow a selected parent. Parameters at zero are skipped and
+  listed.
+- **Prior information** is written in PEST's own units, so every equation naming a rescaled
+  parameter is rewritten exactly: a linear term takes *v* into its coefficient, a log term
+  moves `log10(v)` to the right-hand side. Each equation's residual is the same number as
+  before, so its weight is unchanged.
+- **Warned, not converted:** settings in parameter units that one factor per parameter can't
+  convert — `INCTYP absolute` and `DERINCLB` of groups holding rescaled parameters, `absolute(n)`
+  change limits — and files named in the control file that were written for the old values
+  (`++parcov`, `++base_jacobian`, `++ies_par_en`, SVD-assist `basepestfile` / `basejacfile`).
+  A Jacobian given to PEST another way (a restart, a command-line switch) can't be seen from
+  the control file; don't reuse one across a rescale.
+
+`--set`, `--eol`, `--v1|--v2` and `--no_manifest` work as for `parrep`.
 
 ### hpstart — modeled observations → new PEST_HP .hp file
 
@@ -330,8 +428,8 @@ read and observations the control file lists but no file produced are reported.
 ### diff — what changed
 
 ```
-makepst diff tr12.pst tr13.pst [--xlsx changes.xlsx] [--rtol 1e-9] [--max_rows 50]
-makepst diff tr13.xlsm tr13.pst                # is the control file still what the workbook says?
+makepst diff tr12.pst tr13.pst [--xlsx changes.xlsx] [--file changes.txt] [--rtol 1e-9] [--max_rows 50]
+makepst diff tr13.xlsx tr13.pst                # is the control file still what the workbook says?
 ```
 
 Compares the tables, not the text: parameters and observations added, removed or changed
@@ -341,11 +439,12 @@ instruction pairs, command lines and header comments. Numbers are compared with 
 tolerance, so `49.7377` vs `49.73775` shows up at the default `1e-9` and disappears at
 `--rtol 1e-5`. Prints a table per section and a one-line summary; `--xlsx` writes the same
 tables to a workbook for review. Exits 1 when there are differences, like `diff`.
+`--file` writes the complete text report, including rows beyond the console's `--max_rows` limit.
 
 ### log — the run ledger
 
 ```
-makepst log [FOLDER ...] [--file tr13.xlsm] [--command build] [--last 10] [--check] [--no_recursive]
+makepst log [FOLDER ...] [--file tr13.xlsx] [--command build] [--last 10] [--check] [--no_recursive]
 ```
 
 Every manifest under the folders (default: the current one, recursively), oldest first, one
@@ -356,8 +455,8 @@ the workbook?" even after the file was renamed or overwritten. `--check` adds a 
 `provenance`: `unchanged` / `changed` / `missing`.
 
 ```
-2026-09-19 21:14 build      pest/tr13.pst <- tr13.xlsm  [1068 par 41747 obs 159 prior]  makepst 0.3.0
-2026-09-21 08:10 update     tr13-xlwings.xlsm <- tr13.xlsm, tr13.par  [1068 rows in 8 sheets]  makepst 0.3.0
+2026-09-19 21:14 build      pest/tr13.pst <- tr13.xlsx  [1068 par 41747 obs 159 prior]  makepst 0.3.0
+2026-09-21 08:10 update     tr13-xlwings.xlsx <- tr13.xlsx, tr13.par  [1068 rows in 8 sheets]  makepst 0.3.0
 ```
 
 ### bundle — a run, zipped for review
@@ -385,11 +484,13 @@ Preserved: every parameter, group, observation, prior-information equation, tied
 template/instruction pair, command line, `++` option, header comment, control-data value
 (including PEST_HP keyed tokens), SVD / LSQR / AUI / SVD-assist / regularisation values, and
 the verbatim text of `* sensitivity reuse`, `* derivatives command line`, `* predictive
-analysis` and `* pareto`.
+analysis` and `* pareto`. Any section unknown to this version of makePst is also retained
+verbatim at its original position, so newer or site-specific PEST content survives a round trip.
 
 Normalised: parameter, observation and group names are lower-cased (PEST is
 case-insensitive); numbers are written with 11 significant digits; whitespace and column
-alignment are makePst's own; comments *inside* sections are dropped; observation groups are
+alignment in understood sections is makePst's own; comments *inside understood sections* are
+dropped; observation groups are
 listed in first-use order (or the order of the source file when reading a `.pst`).
 
 Also preserved: covariance-file references in `* observation groups` (an `OBSGP` sheet on
@@ -399,27 +500,27 @@ written back as version 2 unless `--v1` is given; `--v2` writes any control file
 format, with `case.par_data.csv` / `obs_data` / `pargp_data` / `prior_data` beside it. Both
 versions of the same content are identical after reading (`makepst diff` says so).
 
-Not preserved: any unrecognised section (dropped with a warning naming it).
-
 ## Compatibility
 
 | | |
 |---|---|
 | PEST dialects | PEST, PEST_HP (`win_mrun_hours=`, `uptestmin=`, `uptestlim=`, `absparmax(n)=`), PEST++ (`++name(value)` options) |
-| Control-file sections | control data, singular value decomposition, lsqr, automatic user intervention, svd assist, parameter groups, parameter data (incl. tied pairs), observation groups, observation data, model command line, model input/output, prior information (with `&` continuation lines), regularisation. Kept verbatim: sensitivity reuse, derivatives command line, predictive analysis, pareto. |
+| Control-file sections | control data, singular value decomposition, lsqr, automatic user intervention, svd assist, parameter groups, parameter data (incl. tied pairs), observation groups, observation data, model command line, model input/output, prior information (with `&` continuation lines), regularisation. Kept verbatim: sensitivity reuse, derivatives command line, predictive analysis, pareto, and all unknown sections. |
 | File formats | classic (version 1) and PEST++ version 2 (`pcf version=2`, `* control data keyword` with control variables and `++` options, `* … external` csv tables with `sep=` / `missing_values=`, `partied` column); observation covariance files in `* observation groups` |
-| Not supported | unknown sections — dropped with a warning |
 | Result files | `.par`, `.res` / `.rei`, PESTPP-IES `case.N.par.csv` / `case.N.obs.csv` / `case.phi.actual.csv` |
-| Table inputs | `.xlsx` / `.xlsm` sheets (openpyxl), `.csv` |
+| Table inputs | `.xlsx` / `.xlsx` sheets (openpyxl), `.csv` |
 | Workbook update | openpyxl backend on any platform (macros kept, charts/images dropped, no recalculation); xlwings backend on Windows/macOS with Excel (everything kept, recalculated) |
 | Platforms | CI runs the suite on Ubuntu 24.04 and Windows Server 2022 for Python 3.9, 3.11 and 3.13. macOS is expected to work but is not exercised in CI. |
 | Python | ≥ 3.9; pandas ≥ 2.0 (tested with 2.3 and 3.0), numpy, openpyxl ≥ 3.1; optional xlwings, pyemu, pytest |
 
 ## Validation
 
-Two layers. `Pst.validate()` runs before every write (`build`, `dump`, `parrep`, `write_pst`)
-and enforces **internal consistency** of the tables, changing what it can and refusing what it
-cannot:
+`Pst.validate()` is a read-only audit of the in-memory tables. It returns a report with
+`errors`, `warnings`, and `fixes_available`; inspecting it never changes the `Pst`. Apply
+reviewed fixes explicitly with `pst.apply_fixes(report)`, or use `pst.normalize()` to apply
+all currently available normalizations. Writers refuse validation errors and serialize the
+current tables without modifying them. The CLI's file-building commands call `normalize()`
+explicitly before writing.
 
 | check | outcome |
 |---|---|
@@ -427,19 +528,19 @@ cannot:
 | duplicate parameter, observation or prior-information names | error |
 | parameter group used but not defined | error |
 | tied parameter whose target is missing, or tied to a tied parameter | error |
-| tied to a fixed parameter | parameter becomes fixed (message) |
-| parameter group defined but unused | dropped from the file |
-| prior equation referencing a fixed, tied or missing parameter | dropped (message) |
+| tied to a fixed parameter | error and fix available: convert it to fixed |
+| parameter group defined but unused | fix available: remove the group |
+| prior equation referencing a fixed, tied or missing parameter | error and fix available: rebuild prior information, dropping those equations |
 | adjustable `PARVAL1` outside `[PARLBND, PARUBND]` | warning |
 | control value that is computed (`npar` …) or unknown | ignored (warning) |
 
-`makepst validate` is the **pestchek-style report**: it changes nothing, looks beyond the
-tables at the files the control file points to, and exits 1 on errors so a batch file can
-stop:
+`makepst validate` uses the same table checks and adds the **pestchek-style report**: it
+changes nothing, looks beyond the tables at the files the control file points to, and exits 1
+on errors so a batch file can stop:
 
 ```
 makepst validate model.pst [--outputs] [--strict] [--quiet] [--base_dir DIR]
-makepst validate tr13.xlsm            # a workbook with a BUILD sheet is built first, in memory
+makepst validate tr13.xlsx            # a workbook with a BUILD sheet is built first, in memory
 ```
 
 | check | severity |
@@ -456,12 +557,22 @@ makepst validate tr13.xlsm            # a workbook with a BUILD sheet is built f
 | template: parameter space narrower than 3 characters or containing a tab | error |
 | template: a value that cannot be written into its space as PEST writes numbers (`PRECIS` / `DPOINT` honoured), e.g. `1e-10` in five characters | error |
 | instruction file syntax: `l` / `t` integers, marker delimiters, `!` balance, `[name]n1:n2` order, `dum` in a fixed field, continuation `&` placement, `l` only at the start of a line, `t` and fixed columns moving left to right, unknown instructions — checked statically, without model output | error |
-| section in the `.pst` that makePst drops on read | warning |
+| `++` option with a value PEST++ does not accept (integer given `2.5`, boolean given `t` or `yes`, number list with a non-number, `svd_pack` / `glm_normal_form` / `ies_subset_how` outside their choices, `ies_num_reals` < 1, …); the same option twice, directly or through an alias (`ies_par_en` and `ies_parameter_ensemble`) | error |
+| `++` option not in PEST++'s option list — kept, with the closest known name (`unknown PEST++ option "ies_num_real"; did you mean "ies_num_reals"?`); a control variable such as `noptmax` given as a `++` option | warning (note with `++forgive_unknown_args(true)`) |
+| deprecated `++` option that PEST++ ignores (`mat_inv`, `upgrade_augment`, `svd_pack(propack)`, …) | note |
+| unknown section in the `.pst` that makePst preserves verbatim | note |
 | template or instruction file missing; bad `ptf` / `pif` line | error |
 | parameter cited in no template; template citing an unknown parameter | error |
 | observation read by no instruction file, by two files, or twice in one; unknown observation in an instruction file | error |
 | model command / model-input folder not found next to the control file | warning |
 | `--outputs`: each instruction file run against its model output file when present | note (success) / warning (failure) |
+
+The `++` checks use the option list in `makepst/pestpp.py`, read off PEST++ 5.2.29's option parser
+(250 options and 34 aliases, with their types). They point at where each option came from —
+`PP!A17` for a workbook cell, `pp.csv:17`, `line 42` of a control file — and `build` prints them
+too, without refusing to write: plain PEST ignores `++` lines, and a newer PEST++ may know an
+option this list does not. PEST++ itself stops on an option it does not accept, so fix or remove
+what is flagged before a run.
 
 The `--outputs` interpreter follows the PEST manual (primary and secondary markers, `l`, `w`,
 `t`, `!name!`, `[name]c1:c2`, `(name)c1:c2`, `dum`, `&` continuation) and catches the classic
@@ -483,12 +594,12 @@ from?" after the fact:
 {
   "makepst": "0.3.0",
   "command": "build",
-  "argv": ["build", "tr13.pst", "regul", "--set_ctl_xls", "tr13.xlsm,CONTROL", "..."],
+  "argv": ["build", "tr13.pst", "regul", "--set_ctl_xls", "tr13.xlsx,CONTROL", "..."],
   "created": "2026-09-19T13:51:39-04:00",
   "user": "hydro", "host": "OU13700", "cwd": "D:\\...\\0023-makePst",
   "python": "3.12.12", "pandas": "3.0.5", "platform": "Windows-11-10.0.26200-SP0",
   "sources": [
-    {"path": "D:\\...\\tr13.xlsm", "sha256": "9d641a2f...", "size": 3089317,
+    {"path": "D:\\...\\tr13.xlsx", "sha256": "9d641a2f...", "size": 3089317,
      "modified": "2026-07-12T03:32:10-04:00", "role": "control",
      "sheets": ["CONTROL", "PARGP", "PAR_HK", "PAR_VK", "...", "PPglm"]}
   ],
@@ -548,10 +659,11 @@ from makepst import Pst, read_pst, write_pst, to_workbook, update_workbook, load
 pst = read_pst('run.pst')                    # Pst: .par/.obs/.pargp/.prior DataFrames, .control dict, ...
 pst.fill_parval('run.3.par.csv', real='best')
 pst.set_control({'noptmax': 0})
+pst.rescale_par(patterns=['hk*'], include_fixed=False)   # values -> SCALE; returns a report dict
 write_pst(pst, 'run_final.pst', dump_tpl=False)
 
 to_workbook(pst, 'run.xlsx', split=True)
-update_workbook('book.xlsm', par='run.par', res='run.res', out='book_results.xlsm',
+update_workbook('book.xlsx', par='run.par', res='run.res', out='book_results.xlsx',
                 sheets=['PAR_*'], groups=['hk'])
 ```
 
@@ -583,9 +695,10 @@ makepst/
   writer.py         Pst -> .pst text (+ dump.tpl)
   reader.py         .pst text -> Pst
   excel.py          sheets -> Pst; Pst -> workbook; results -> existing workbook
-  cli.py            init / validate / build / dump / update / parrep / diff / tempchek / inschek / log / bundle
+  cli.py            init / validate / build / dump / update / parrep / set / rescale / reweight / diff / tempchek / inschek / log / bundle
   diff.py           semantic comparison of two Pst objects
   phi.py            objective function by group from residuals; IES realization phis
+  reweight.py       observation-group balancing, scaling and bounded weight adjustment
   pyemu_bridge.py   to_pyemu / from_pyemu
   checks.py         the validate report: table checks, template / instruction cross-checks, instruction interpreter
   rules.py          pestchek's rules (parameters, groups, observations, prior information, control variables)
