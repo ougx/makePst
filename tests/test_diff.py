@@ -37,7 +37,7 @@ def test_identical_is_empty():
 
 def test_changes_are_reported():
     old, new = read_pst(PST), changed()
-    new.validate()
+    new.normalize()
     d = compare(old, new)
     par = d.par.set_index(['PARNME', 'column'])
     assert par.loc[('hk1_cc01', 'PARUBND'), 'old'] == '300' and par.loc[('hk1_cc01', 'PARUBND'), 'new'] == '500'
@@ -51,7 +51,7 @@ def test_changes_are_reported():
     assert d.pestpp.iloc[0].tolist() == ['lambdas', 'changed', '0.1,1,10,100', '1,10']
     assert d.comments.iloc[0].tolist() == ['added', 'tr14 based tr13']
     assert d.io.iloc[0].tolist() == ['ins', 'added', 'extra.ins', 'extra.out']
-    # rchss became fixed, so its regularisation equation disappeared on validate()
+    # rchss became fixed, so normalize() dropped its regularisation equation
     assert d.prior[d.prior['change'] == 'removed']['PINME'].tolist() == ['rchss']
     assert 'par: 1 removed' in d.summary() or 'par:' in d.summary()
     text = d.to_text(max_rows=2)
@@ -65,9 +65,28 @@ def test_tolerance():
     assert compare(old, new, rtol=1e-6).empty
 
 
+def test_tied_parameter_ratio_change_is_reported():
+    old, new = read_pst(PST), read_pst(PST)
+    child = new.par['PARNME'] == 'hk1_cc02'
+    new.par.loc[child, 'PARVAL1'] *= 1.1
+
+    ratio = compare(old, new).par
+    ratio = ratio[ratio['column'] == 'tied factor']
+    assert ratio[['PARNME', 'change']].values.tolist() == [['hk1_cc02', 'changed']]
+
+
+def test_tied_parameter_ratio_is_unchanged_when_parent_and_child_scale_together():
+    old, new = read_pst(PST), read_pst(PST)
+    both = new.par['PARNME'].isin(['hk1_cc01', 'hk1_cc02'])
+    new.par.loc[both, 'PARVAL1'] *= 2
+
+    d = compare(old, new)
+    assert not (d.par['column'] == 'tied factor').any()
+
+
 def test_cli_and_workbook(tmp_path, capsys):
     new = tmp_path / 'new.pst'
-    write_pst(changed(), str(new), dump_tpl=False)
+    write_pst(changed().normalize(), str(new), dump_tpl=False)
     with pytest.raises(SystemExit):                          # differences -> exit 1
         main(['diff', PST, str(new), '--xlsx', str(tmp_path / 'd.xlsx'), '--max_rows', '1'])
     out = capsys.readouterr().out

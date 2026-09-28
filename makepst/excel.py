@@ -47,8 +47,10 @@ def load_table(spec):
                                   'Existing cached values may also be stale; freshness cannot be determined.')
             finally:
                 wb.close()
+        df.attrs['where'] = f'{sheet}!A{{}}'           # row i of the frame is sheet row i + 2
     else:
         df = pd.read_csv(spec)
+        df.attrs['where'] = f'{os.path.basename(spec)}:{{}}'
     df.columns = [c.strip().upper() if isinstance(c, str) else c for c in df.columns]
     return df
 

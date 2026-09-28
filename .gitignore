@@ -1,6 +1,4 @@
 # model / calibration data lives next to the code but is not part of the package
-*.xlsm
-*.xlsx
 *.pst
 *.par
 *.res
@@ -31,6 +29,5 @@ dist/
 !examples/minimal/*.ins
 
 # local copies of real projects used for timing (proprietary)
-examples/mnnrd/
 paper/*.docx
 .docx_render/manuscript.pdf

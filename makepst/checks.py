@@ -64,7 +64,7 @@ def check_tables(pst: Pst):
         err('parameter groups', f'used but not defined: {_names(missing)}')
     unused = [g for g in pst.pargp['PARGPNME'] if g not in set(par['PARGP'])]
     if unused:
-        warn('parameter groups', f'defined but unused (dropped on write): {_names(unused)}')
+        warn('parameter groups', f'defined but unused (removable with normalize): {_names(unused)}')
 
     trans = par.set_index('PARNME')['PARTRANS'] if not par['PARNME'].duplicated().any() else None
     bad_trans = par.loc[~par['PARTRANS'].isin(('log', 'none', 'fixed', 'tied')), 'PARNME']
@@ -129,7 +129,7 @@ def check_tables(pst: Pst):
             else:
                 notadj = [p for p in refs if p not in adjustable]
                 if notadj:
-                    warn(f'prior {r.PINME}', f'references fixed/tied parameters (dropped on write): {_names(notadj)}')
+                    warn(f'prior {r.PINME}', f'references fixed/tied parameters (removable with normalize): {_names(notadj)}')
                 logs = set(re.findall(r'log\((\w+)\)', eq.lower()))
                 wrong = [p for p in refs if (trans is not None) and ((trans.get(p) == 'log') != (p in logs))]
                 if wrong:
@@ -383,7 +383,7 @@ def check_files(pst: Pst, base_dir='.', outputs=False):
 
 
 def check_sections(pst_path):
-    """Sections in a control file that makepst does not understand (dropped on read)."""
+    """Sections makePst cannot interpret but will safely carry through a round trip."""
     out = []
     with open(pst_path, errors='replace') as f:
         for line in f:
@@ -392,7 +392,7 @@ def check_sections(pst_path):
                 name = s[1:].strip().lower()
                 base = name[:-len(' external')] if name.endswith(' external') else name
                 if base not in KNOWN_SECTIONS:
-                    out.append(Finding('warning', 'sections', f'unknown section dropped on read: * {name}'))
+                    out.append(Finding('info', 'sections', f'unknown section preserved verbatim: * {name}'))
     return out
 
 
@@ -510,8 +510,11 @@ def _store(values, name, text, li):
 
 # ---------------------------------------------------------------------- driver
 def validate(pst: Pst, base_dir='.', pst_path=None, outputs=False):
+    from .pestpp import check_pestpp
     from .rules import check_extra
-    findings = check_tables(pst) + check_extra(pst)
+    # `++` findings are reported here but kept out of Pst.validate(), which gates writing: plain PEST ignores
+    # `++` lines, and an option judged against this registry must not stop a control file being written.
+    findings = check_tables(pst) + check_extra(pst) + check_pestpp(pst)
     if pst_path:
         findings += check_sections(pst_path)
     findings += check_files(pst, base_dir, outputs)

@@ -22,6 +22,13 @@ SPLITACTION = ('smaller', 'zero', 'previous')
 # control variables only PEST_HP (or PEST with /hpstart) accepts; pestchek warns about each
 HP_ONLY = ('run_abandon_fac', 'win_mrun_hours', 'softstophours', 'hardstophours', 'rrfsave', 'zerosenval',
            'orr_not_first', 'uptestlim', 'uptestmin', 'reg2measrat', 'jcowarnthresh', 'jcozerothresh')
+# `++` options that some PEST++ builds reject outright, with what is known first-hand about which. PEST++ stops
+# on an option it does not recognise rather than ignoring it, and old copies of the binaries live on in run
+# folders, so a control file that works on one machine can refuse to start on another. Add entries as they
+# are met; an option missing here is not a claim that every build accepts it.
+PESTPP_VERSIONED = {
+    'glm_hp_lambdas': 'accepted by pestpp-glm 5.2.27, rejected by 5.2.17',
+}
 
 
 def _finding(severity, where, message):
@@ -113,6 +120,12 @@ def check_parameters(pst: Pst):
         bad = par.loc[(par['PARNME'].isin(parents) & (v == 0)).fillna(False), 'PARNME']
         if len(bad):
             err('parameters', f'parent of a tied parameter cannot have an initial value of zero: {_names(bad)}')
+        # A tied parameter keeps its own bounds, and PEST_HP refuses to start when its initial value falls
+        # outside them. That is easy to do without noticing: setting a parent's value - parameter replacement,
+        # a hand edit, a new starting point - moves the children but not their bounds.
+        bad = par.loc[(tied & ((v < lb) | (v > ub))).fillna(False), 'PARNME']
+        if len(bad):
+            err('parameters', f'tied PARVAL1 outside its own bounds: {_names(bad)}')
     bad = par.loc[(par['PARGP'].astype(str).str.lower() == 'none') & ~trans.isin(('tied', 'fixed')), 'PARNME']
     if len(bad):
         err('parameters', f'group "none" is reserved for fixed and tied parameters: {_names(bad)}')
@@ -395,6 +408,11 @@ def check_control(pst: Pst):
     if hp:
         out.append(_finding('info', 'control data',
                             f'PEST_HP-only variables (plain PEST needs /hpstart): {", ".join(k.upper() for k in hp)}'))
+    sensitive = sorted({k.lower() for k, _ in pst.pestpp} & set(PESTPP_VERSIONED))
+    for k in sensitive:
+        out.append(_finding('info', 'pestpp options',
+                            f'++{k} is not accepted by every PEST++ build ({PESTPP_VERSIONED[k]}); a binary that '
+                            f'does not know it stops with "the following \'++\' args were not accepted"'))
     return out
 
 

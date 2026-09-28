@@ -66,3 +66,34 @@ def test_raw_sections_round_trip():
     out = to_text(p)
     i, j = out.index('* observation data'), out.index('* model command line')
     assert '* derivatives command line\nderiv.bat\nextderiv.dat\n' in out[i:j]
+
+
+def test_unknown_sections_are_preserved_verbatim_in_place():
+    text = ('pcf\n* control data\nrestart estimation\n1 1 1 0 1\n1 1 single point\n10 2 0.3 0.03 10\n'
+            '3 3 0.001\n0.1\n5 0.005 4 4 0.005 4\n1 1 1\n* parameter groups\n'
+            'hk relative 0.01 0 switch 2 parabolic\n* parameter data\n'
+            'hk1 log factor 10 0.1 1000 hk 1 0 1\n* observation groups\nhead\n'
+            '* observation data\nh1 1.0 1.0 head\n'
+            '* Site Specific Future Section   \n  keep leading and trailing spaces  \n\n# body comment\n'
+            '++future_option(retain me here)\n'
+            '* model command line\nrun.bat\n* model input/output\na.tpl a.in\nb.ins b.out\n')
+    with pytest.warns(UserWarning, match=r'not understood; preserved verbatim'):
+        p = from_text(text)
+
+    name = 'site specific future section'
+    assert p.raw_sections[name] == ['  keep leading and trailing spaces  ', '', '# body comment',
+                                    '++future_option(retain me here)']
+    assert p.raw_section_headers[name] == '* Site Specific Future Section   '
+    assert p.section_order[p.raw_section_positions[name]] == name
+
+    out = to_text(p)
+    block = ('* Site Specific Future Section   \n'
+             '  keep leading and trailing spaces  \n\n# body comment\n'
+             '++future_option(retain me here)\n')
+    assert block in out
+    assert out.count('++future_option(retain me here)') == 1
+    assert out.index('* observation data') < out.index(block) < out.index('* model command line')
+
+    with pytest.warns(UserWarning, match=r'not understood; preserved verbatim'):
+        q = from_text(out)
+    assert q.raw_sections[name] == p.raw_sections[name]

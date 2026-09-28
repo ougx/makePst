@@ -29,27 +29,43 @@ EXTERNAL_COLUMNS = {
 
 
 def _split_sections(lines):
-    """-> (comment lines, {section name: body lines}, ++ lines)."""
-    comments, sections, pp = [], {}, []
+    """Split text for parsing while retaining an exact record of every section block.
+
+    The parser-facing bodies intentionally keep the historical behaviour (blank lines and
+    comments are ignored and trailing whitespace is stripped).  ``raw`` is separate: it keeps
+    each original header and every body line exactly, so an unparsed section never loses data.
+    """
+    comments, sections, pp, raw, order = [], {}, [], {}, []
     current = None
-    for raw in lines[1:]:
-        line = raw.rstrip()
+    for lineno, original in enumerate(lines[1:], 2):
+        line = original.rstrip()
         s = line.strip()
-        if not s:
-            continue
-        if s.startswith('++'):
-            pp.append(s[2:])
-        elif s.startswith('*'):
+        if s.startswith('*'):
             current = s[1:].strip().lower()
             sections[current] = []
+            raw[current] = {'header': original, 'lines': []}
+            order.append(current)
+        elif s.startswith('++'):
+            pp.append((lineno, s[2:]))
+            if current is not None:
+                # ``++`` is globally meaningful to PEST++, but it is also physically part of
+                # the current opaque block.  Retain it there; the writer suppresses the
+                # corresponding generated option so the line is not duplicated.
+                raw[current]['lines'].append(original)
+        elif not s:
+            if current is not None:
+                raw[current]['lines'].append(original)
         elif s.startswith('#'):
             if current is None:
                 comments.append(s[1:].strip())
+            else:
+                raw[current]['lines'].append(original)
         elif current is None:
             raise ValueError(f'unexpected text before the first section: {line!r}')
         else:
             sections[current].append(line)
-    return comments, sections, pp
+            raw[current]['lines'].append(original)
+    return comments, sections, pp, raw, order
 
 
 def _table(lines, cols):
@@ -127,12 +143,12 @@ def from_text(text, base_dir='.'):
     if not lines or not lines[0].strip().lower().startswith('pcf'):
         raise ValueError("not a PEST control file (first line must be 'pcf')")
     version = 2 if 'version=2' in lines[0].replace(' ', '').lower() else 1
-    comments, sections, pp = _split_sections(lines)
+    comments, sections, pp, raw, section_order = _split_sections(lines)
 
     if 'control data keyword' in sections:
         version = 2
         ctl, kw_pp = _keyword_control(sections.pop('control data keyword'))
-        pp = [f'{k}({v})' for k, v in kw_pp] + pp
+        pp = [(None, f'{k}({v})') for k, v in kw_pp] + pp
     elif 'control data' in sections:
         ctl = CONTROL.parse(sections.pop('control data'))
     else:
@@ -141,6 +157,7 @@ def from_text(text, base_dir='.'):
     pst = Pst(ctl.get('pestmode', 'estimation'))
     pst.version = version
     pst.comments = comments
+    pst.section_order = section_order
     counts = {k: ctl.get(k) for k in COMPUTED}
     pst.use_svd = 'singular value decomposition' in sections or any(
         k in ctl for k in ('svdmode', 'maxsing', 'eigthresh'))
@@ -218,12 +235,24 @@ def from_text(text, base_dir='.'):
 
     for name in RAW_SECTIONS:
         if name in sections:
-            pst.raw_sections[name] = sections.pop(name)
-    for name in sections:
-        warnings.warn(f'section * {name} not understood and dropped')
+            sections.pop(name)
+            pst.raw_sections[name] = raw[name]['lines']
+            pst.raw_section_headers[name] = raw[name]['header']
+            pst.raw_section_positions[name] = section_order.index(name)
+    for name in list(sections):
+        # Unknown sections are opaque, not invalid.  Keeping the exact source block makes a
+        # read/write cycle safe even when makePst predates the PEST dialect that introduced it.
+        sections.pop(name)
+        pst.raw_sections[name] = raw[name]['lines']
+        pst.raw_section_headers[name] = raw[name]['header']
+        pst.raw_section_positions[name] = section_order.index(name)
+        warnings.warn(f'section * {name} not understood; preserved verbatim')
 
-    for ln in pp:
-        pst.pestpp += _PP.findall(ln)
+    for lineno, ln in pp:
+        for key, value in _PP.findall(ln):
+            pst.pestpp.append((key, value))
+            where = f'line {lineno}' if lineno else 'control data keyword'
+            pst.pestpp_where.setdefault(key.lower(), []).append(where)
 
     for k, want in (('npar', pst.npar), ('nobs', pst.nobs), ('nprior', pst.nprior)):
         if counts.get(k) not in (None, want):
@@ -232,5 +261,12 @@ def from_text(text, base_dir='.'):
 
 
 def read_pst(path):
-    with open(path) as f:
-        return from_text(f.read(), base_dir=os.path.dirname(os.path.abspath(path)))
+    # newline='' keeps the file's own line endings visible, so a round trip can write them back: PEST reads
+    # either, but a control file that silently changes from CRLF to LF no longer compares byte-for-byte with
+    # its parent, and on Windows the model chain is kept CRLF throughout.
+    with open(path, newline='') as f:
+        raw = f.read()
+    pst = from_text(raw.replace('\r\n', '\n'), base_dir=os.path.dirname(os.path.abspath(path)))
+    crlf = raw.count('\r\n')
+    pst.eol = '\r\n' if crlf and crlf >= raw.count('\n') - crlf else '\n'
+    return pst

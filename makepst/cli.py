@@ -1,17 +1,22 @@
 """Command line: build (Excel/CSV -> pst), dump (pst -> Excel), update (values -> existing workbook),
-parrep (.par values -> pst), init (starter workbook), validate (pestchek-style checks), diff (compare two),
-tempchek (templates -> model input files), inschek (model output files -> observation values),
+parrep (.par values -> pst), set / rescale (parameter edits -> pst), init (starter workbook),
+validate (pestchek-style checks), diff (compare two),
+reweight (observation weights -> pst), tempchek (templates -> model input files), inschek (model output files -> observation values),
 provenance / log / bundle (manifests: verify, list as a ledger, zip a run)."""
 import argparse
 import os
 import shlex
 import sys
 
+import pandas as pd
+
 from . import __version__
 from .excel import expand_spec, load_table, to_workbook, update_workbook
+from .pestpp import check_pestpp
 from .provenance import Manifest, check_manifest
-from .pst import Pst, read_par
+from .pst import Pst, _to_internal, read_obs_ensemble, read_par, read_res
 from .reader import read_pst
+from .reweight import balance_weights, discrepancy_weights, equal_shares, scale_weights
 from .writer import write_pst
 
 TABLES = ('pargp', 'par', 'tied', 'prior', 'obs', 'obsgp', 'io', 'pp', 'comment')
@@ -88,8 +93,18 @@ def _version(args):
     return 2 if getattr(args, 'v2', False) else 1 if getattr(args, 'v1', False) else None
 
 
-def _finish_pst(pst, path, manifest, dump_tpl, version=None):
-    write_pst(pst, path, dump_tpl=dump_tpl, version=version)
+def _eol(args):
+    """--eol keep|crlf|lf -> what to write with, or None to keep the endings the file was read with."""
+    return {'crlf': '\r\n', 'lf': '\n'}.get(getattr(args, 'eol', 'keep'))
+
+
+def _finish_pst(pst, path, manifest, dump_tpl, version=None, eol=None):
+    # Building a control file is an explicit normalization boundary. Library callers can
+    # inspect Pst.validate() and choose which available fixes to apply before writing.
+    pst.normalize()
+    for f in check_pestpp(pst):                 # reported, not blocking: see checks.validate
+        print(f)
+    write_pst(pst, path, dump_tpl=dump_tpl, version=version, eol=eol)
     if manifest is not None:
         manifest.set_output(path, **pst.counts)
         print(f'manifest written to {manifest.write()}')
@@ -189,7 +204,182 @@ def parrep(args):
         if not _:
             raise SystemExit(f'--set expects NAME=VALUE, got {kv!r}')
         pst.set_control({k: v})
-    _finish_pst(pst, args.out, manifest, dump_tpl=False, version=_version(args))
+    _finish_pst(pst, args.out, manifest, dump_tpl=False, version=_version(args), eol=_eol(args))
+
+
+def set_par(args):
+    """Set parameter fields by name or glob, keeping tied children and preferred values consistent."""
+    manifest = None if args.no_manifest else Manifest('set', args._argv)
+    pst = read_pst(args.pstfile)
+    if manifest is not None:
+        manifest.add_source(args.pstfile, role='base control file')
+    changes = {}
+    for spec in args.par:
+        name, sep, fields = spec.partition(':')
+        if not sep or not fields.strip():
+            raise SystemExit(f'--par expects NAME:FIELD=VALUE[,FIELD=VALUE], got {spec!r}')
+        want = {}
+        for item in fields.split(','):
+            k, eq, v = item.partition('=')
+            if not eq:
+                raise SystemExit(f'--par expects FIELD=VALUE, got {item!r} in {spec!r}')
+            want[k.strip()] = v.strip()
+        changes.setdefault(name.strip(), {}).update(want)
+    try:
+        report = pst.set_par(changes, sync_ties=not args.no_sync_ties, sync_prior=not args.no_sync_prior)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    for kv in args.set:
+        k, _, v = kv.partition('=')
+        if not _:
+            raise SystemExit(f'--set expects NAME=VALUE, got {kv!r}')
+        pst.set_control({k: v})
+    print(f"{len(report['parameters'])} parameters set"
+          + (f", {len(report['tied_rescaled'])} tied children rescaled" if report['tied_rescaled'] else '')
+          + (f", {len(report['prior_retargeted'])} preferred values retargeted" if report['prior_retargeted'] else ''))
+    if manifest is not None:
+        manifest.add(changes=changes, sync_ties=not args.no_sync_ties, sync_prior=not args.no_sync_prior)
+    _finish_pst(pst, args.out, manifest, dump_tpl=False, version=_version(args), eol=_eol(args))
+
+
+def rescale(args):
+    """Move parameter values into SCALE (every selected parameter starts at 1), or back with --undo."""
+    manifest = None if args.no_manifest else Manifest('rescale', args._argv)
+    pst = read_pst(args.pstfile)
+    if manifest is not None:
+        manifest.add_source(args.pstfile, role='base control file')
+    flat = lambda items: [x.strip() for s in items for x in s.split(',') if x.strip()]   # noqa: E731
+    try:
+        report = pst.rescale_par(flat(args.par) or None, flat(args.pargp) or None,
+                                 include_fixed=not args.exclude_fixed, undo=args.undo)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    for kv in args.set:
+        k, _, v = kv.partition('=')
+        if not _:
+            raise SystemExit(f'--set expects NAME=VALUE, got {kv!r}')
+        pst.set_control({k: v})
+    print(f"{len(report['rescaled'])} parameters {'unscaled' if args.undo else 'rescaled to 1'}"
+          + (f", {len(report['prior_rewritten'])} prior equations rewritten" if report['prior_rewritten'] else ''))
+    for name, why in list(report['skipped'].items())[:10]:
+        print(f'SKIPPED {name}: {why}')
+    if len(report['skipped']) > 10:
+        print(f"SKIPPED ... {len(report['skipped']) - 10} more")
+    for note in report['warnings']:
+        print(f'WARNING {note}')
+    if manifest is not None:
+        manifest.add(par=args.par, pargp=args.pargp, include_fixed=not args.exclude_fixed, undo=args.undo,
+                     rescaled=len(report['rescaled']), skipped=report['skipped'],
+                     prior_rewritten=report['prior_rewritten'])
+    _finish_pst(pst, args.out, manifest, dump_tpl=False, version=_version(args), eol=_eol(args))
+
+
+def _factor_specs(specs):
+    factors = {}
+    for spec in specs:
+        group, sep, value = spec.partition('=')
+        if not sep or not group.strip() or not value.strip():
+            raise ValueError(f'--factor expects GROUP=NUMBER, got {spec!r}')
+        group = group.strip().lower()
+        if group in factors:
+            raise ValueError(f'duplicate group factor for {group}')
+        try:
+            factors[group] = float(value)
+        except ValueError:
+            raise ValueError(f'factor for {group} must be numeric') from None
+    return factors
+
+
+def _residual_source(args, pst):
+    if args.res:
+        return read_res(args.res)
+    if args.obs_csv:
+        return read_obs_ensemble(args.obs_csv, args.real, pst=pst)
+    return None
+
+
+def reweight(args):
+    """Adjust observation weights by group contribution or explicit factors."""
+    if not args.dry_run and not args.out:
+        raise SystemExit('reweight requires OUT unless --dry_run is used')
+    if args.out and os.path.abspath(args.pstfile) == os.path.abspath(args.out):
+        raise SystemExit('reweight input and output must be different files')
+    if args.real and not args.obs_csv:
+        raise SystemExit('--real requires --obs_csv')
+
+    manifest = None if args.no_manifest or args.dry_run else Manifest('reweight', args._argv)
+    pst = read_pst(args.pstfile)
+    if manifest is not None:
+        manifest.add_source(args.pstfile, role='base control file')
+    if args.res and manifest is not None:
+        manifest.add_source(args.res, role='residuals')
+    if args.obs_csv and manifest is not None:
+        manifest.add_source(args.obs_csv, role='observation ensemble')
+
+    try:
+        residuals = _residual_source(args, pst)
+        clip = tuple(args.clip) if args.clip is not None else None
+        if args.equal:
+            if residuals is None:
+                raise ValueError('--equal requires --res or --obs_csv')
+            shares, skipped = equal_shares(pst, residuals)
+            for group, reason in skipped.items():
+                print(f'INFO    skipping group {group}: {reason}')
+            if not shares:
+                raise ValueError('no eligible positively weighted observation groups with nonzero phi')
+            report = balance_weights(pst, residuals, shares, clip=clip)
+            mode = 'equal'
+            settings = {'groups': list(shares)}
+        elif args.discrepancy:
+            if residuals is None:
+                raise ValueError('--discrepancy requires --res or --obs_csv')
+            report, skipped = discrepancy_weights(pst, residuals, by=args.discrepancy, clip=clip)
+            for group, reason in skipped.items():
+                print(f'INFO    skipping group {group}: {reason}')
+            mode = 'discrepancy'
+            settings = {'by': args.discrepancy, 'groups': report['OBGNME'].tolist()}
+        elif args.targets:
+            path, sheet = _spec_parts(args.targets)
+            if manifest is not None:
+                manifest.add_source(path, sheet, role='target group shares')
+            table = load_table(args.targets)
+            required = {'OBGNME', 'TARGET_SHARE'}
+            missing = required - set(table.columns)
+            if missing:
+                raise ValueError(f'--targets needs columns: {", ".join(sorted(missing))}')
+            shares = {}
+            for row in table[['OBGNME', 'TARGET_SHARE']].itertuples(index=False):
+                group = str(row.OBGNME).strip().lower()
+                if not group or group == 'nan':
+                    raise ValueError('--targets contains a blank OBGNME')
+                if group in shares:
+                    raise ValueError(f'duplicate target group {group}')
+                shares[group] = row.TARGET_SHARE
+            report = balance_weights(pst, residuals, shares, clip=clip)
+            mode = 'targets'
+            settings = {'shares': shares}
+        else:
+            factors = _factor_specs(args.factor)
+            if not factors:
+                raise ValueError('at least one --factor is required')
+            report = scale_weights(pst, factors, clip=clip, residuals=residuals)
+            mode = 'factor'
+            settings = {'factors': factors}
+    except (OSError, ValueError) as e:
+        raise SystemExit(str(e)) from None
+
+    print(report.to_string(index=False))
+    if args.report:
+        if args.dry_run:
+            print(f'INFO    --dry_run: report not written to {args.report}')
+        else:
+            report.to_csv(args.report, index=False)
+            print(f'written {args.report}: {len(report)} groups')
+    if manifest is not None:
+        manifest.add(mode=mode, settings=settings, clip=clip, report=args.report, realization=args.real)
+    if args.dry_run:
+        return
+    _finish_pst(pst, args.out, manifest, dump_tpl=False, version=_version(args), eol=_eol(args))
 
 
 def guess_base_dir(pst, target):
@@ -213,7 +403,7 @@ def guess_base_dir(pst, target):
 
 def validate(args):
     """pestchek-style report for a control file or a workbook (built via its BUILD sheet)."""
-    from .checks import summary, validate as run_checks
+    from .checks import Finding, summary, validate as run_checks
     target = args.target
     if target.lower().endswith(WORKBOOK_EXT):
         pst, _ = build_from_workbook(target)
@@ -223,6 +413,7 @@ def validate(args):
         pst_path = target
     base = args.base_dir or guess_base_dir(pst, target)
     findings = run_checks(pst, base_dir=base, pst_path=pst_path, outputs=args.outputs)
+    findings += [Finding('info', 'normalization', str(fix)) for fix in pst.validate().fixes_available]
     if not args.base_dir and not args.quiet:
         print(f'INFO    file paths resolved relative to {base} (override with --base_dir)')
     order = {'error': 0, 'warning': 1, 'info': 2}
@@ -272,12 +463,12 @@ def tempchek(args):
         precis, dpoint = ctl.get('precis', 'single'), ctl.get('dpoint', 'point')
         par = pst.par.set_index('PARNME')[['PARVAL1', 'SCALE', 'OFFSET']].copy()
         if args.par:
-            new = read_par(args.par, args.real)['PARVAL1']
-            missing = [n for n in par.index if n not in new.index]
+            hit, new, _ = _to_internal(read_par(args.par, args.real), pst.par)   # through SCALE / OFFSET
+            missing = list(pst.par.loc[~hit, 'PARNME'])
             if missing:
                 print(f'ERROR   {args.par}: no value for {len(missing)} parameters: {", ".join(missing[:6])}')
                 raise SystemExit(1)
-            par['PARVAL1'] = new.reindex(par.index)
+            par['PARVAL1'] = new.values
         values = scaled_values(par)
         if not args.base_dir:
             print(f'INFO    file paths resolved relative to {base} (override with --base_dir)')
@@ -422,11 +613,21 @@ def diff(args):
     """Semantic comparison of two control files / workbooks; exit 1 when they differ."""
     from .diff import compare
     old, new = _load_target(args.old), _load_target(args.new)
-    old.validate()
-    new.validate()
+    # a workbook stands for the control file `build` would write from it, which is normalized;
+    # a control file is compared as it is
+    for path, pst in ((args.old, old), (args.new, new)):
+        if path.lower().endswith(WORKBOOK_EXT):
+            pst.normalize()
     d = compare(old, new, rtol=args.rtol)
-    print(d.to_text(max_rows=args.max_rows))
-    print(f'{args.old} -> {args.new}: {d.summary()}')
+    print(d.to_text(max_rows=0 if args.summary else args.max_rows))
+    summary = f'{args.old} -> {args.new}: {d.summary()}'
+    print(summary)
+    if args.file:
+        full_report = d.to_text(max_rows=None)
+        with open(args.file, 'w', encoding='utf-8', newline='') as f:
+            f.write(full_report)
+            f.write('\n' + summary + '\n')
+        print(f'written to {args.file}')
     if args.xlsx:
         d.to_workbook(args.xlsx)
         print(f'written to {args.xlsx}')
@@ -547,8 +748,9 @@ def hpstart(args):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # legacy form: makePst.py out.pst mode --add_par_xls ...  (no subcommand)
-    if argv and argv[0] not in ('build', 'dump', 'update', 'parrep', 'init', 'validate', 'provenance', 'log', 'bundle',
-                                'diff', 'tempchek', 'inschek', 'hpstart', '-h', '--help', '-v', '--version'):
+    if argv and argv[0] not in ('build', 'dump', 'update', 'parrep', 'init', 'set', 'rescale', 'reweight', 'validate', 'provenance', 'log',
+                                'bundle', 'diff', 'tempchek', 'inschek', 'hpstart',
+                                '-h', '--help', '-v', '--version'):
         argv.insert(0, 'build')
 
     ap = argparse.ArgumentParser(prog='makepst', description=__doc__)
@@ -576,9 +778,76 @@ def main(argv=None):
     r.add_argument('--set', action='append', default=[], metavar='NAME=VALUE',
                    help='also change a control value, e.g. --set noptmax=0 (repeatable)')
     r.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    r.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
+                   help="line endings to write (default: the input file's own)")
     rf = r.add_mutually_exclusive_group()
     rf.add_argument('--v2', action='store_true', help='write a PEST++ version-2 file')
     rf.add_argument('--v1', action='store_true', help='write the classic format (default: same as the input)')
+
+    s = sub.add_parser('set', help='set parameter fields by name or glob, keeping ties and preferred values consistent')
+    s.add_argument('pstfile', help='control file to read')
+    s.add_argument('out', help='control file to write')
+    s.add_argument('--par', action='append', required=True, metavar='NAME:FIELD=VALUE,...',
+                   help='parameter name or glob, then the fields to set, e.g. '
+                        '--par "sycr0*:parval1=0.15,parlbnd=0.08,parubnd=0.3" (repeatable)')
+    s.add_argument('--set', action='append', default=[], metavar='NAME=VALUE',
+                   help='also change a control value, e.g. --set noptmax=0 (repeatable)')
+    s.add_argument('--no_sync_ties', action='store_true',
+                   help="don't rescale tied children with their parent (they would keep the old ratio and bounds)")
+    s.add_argument('--no_sync_prior', action='store_true',
+                   help="don't move single-parameter preferred values to the new value (they would pull it back)")
+    s.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    s.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
+                   help="line endings to write (default: the input file's own)")
+    sf = s.add_mutually_exclusive_group()
+    sf.add_argument('--v2', action='store_true', help='write a PEST++ version-2 file')
+    sf.add_argument('--v1', action='store_true', help='write the classic format (default: same as the input)')
+
+    rs = sub.add_parser('rescale',
+                        help='move parameter values into SCALE so they start at 1; the model sees the same values')
+    rs.add_argument('pstfile', help='control file to read')
+    rs.add_argument('out', help='control file to write')
+    rs.add_argument('--par', action='append', default=[], metavar='NAME',
+                    help='parameter names or globs, e.g. --par "hk*" (repeatable or comma-separated; default all)')
+    rs.add_argument('--pargp', action='append', default=[], metavar='GROUP',
+                    help='parameter groups (repeatable or comma-separated); with --par, both must match')
+    rs.add_argument('--exclude_fixed', action='store_true', help='leave fixed parameters as they are')
+    rs.add_argument('--undo', action='store_true',
+                    help='fold SCALE back into the values instead (PARVAL1 * SCALE, SCALE = 1)')
+    rs.add_argument('--set', action='append', default=[], metavar='NAME=VALUE',
+                    help='also change a control value, e.g. --set noptmax=0 (repeatable)')
+    rs.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    rs.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
+                    help="line endings to write (default: the input file's own)")
+    rsf = rs.add_mutually_exclusive_group()
+    rsf.add_argument('--v2', action='store_true', help='write a PEST++ version-2 file')
+    rsf.add_argument('--v1', action='store_true', help='write the classic format (default: same as the input)')
+
+    rw = sub.add_parser('reweight', help='adjust observation weights by group contribution or factor')
+    rw.add_argument('pstfile', help='control file to read')
+    rw.add_argument('out', nargs='?', help='new control file to write (required unless --dry_run)')
+    mode = rw.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--equal', action='store_true', help='equalize initial phi among eligible measurement groups')
+    mode.add_argument('--discrepancy', choices=('group', 'obs'),
+                      help='match weights to the current misfit: group = scale each group so its phi equals '
+                           'its weighted-observation count; obs = w = min(w, 1/|residual|) per observation')
+    mode.add_argument('--targets', metavar='TABLE', help='CSV or BOOK,SHEET with OBGNME and TARGET_SHARE columns')
+    mode.add_argument('--factor', action='append', default=[], metavar='GROUP=FACTOR',
+                      help='multiply one group\'s weights (repeatable)')
+    source = rw.add_mutually_exclusive_group()
+    source.add_argument('--res', metavar='RESFILE', help='PEST .res/.rei residuals')
+    source.add_argument('--obs_csv', metavar='FILE', help='PESTPP-IES observation ensemble')
+    rw.add_argument('--real', metavar='NAME', help='IES realization (default base)')
+    rw.add_argument('--clip', nargs=2, type=float, metavar=('MIN', 'MAX'),
+                    help='clip positive final weights to MIN..MAX; original zeros stay zero')
+    rw.add_argument('--report', metavar='CSV', help='write the group before/after report to CSV')
+    rw.add_argument('--dry_run', action='store_true', help='preview the adjustment without writing files')
+    rw.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    rw.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
+                    help="line endings to write (default: the input file's own)")
+    rwf = rw.add_mutually_exclusive_group()
+    rwf.add_argument('--v2', action='store_true', help='write a PEST++ version-2 file')
+    rwf.add_argument('--v1', action='store_true', help='write the classic format')
 
     h = sub.add_parser('hpstart', help='update a PEST_HP .hp file from residual or IES observation values')
     h.add_argument('pstfile', help='control file defining observation and parameter order')
@@ -645,8 +914,11 @@ def main(argv=None):
     f.add_argument('old', help='control file or workbook')
     f.add_argument('new', help='control file or workbook')
     f.add_argument('--xlsx', metavar='FILE', help='also write the differences to a workbook, one sheet per table')
+    f.add_argument('--file', metavar='FILE', help='write the full text report, including all difference rows')
     f.add_argument('--rtol', type=float, default=1e-9, help='relative tolerance for numbers (default 1e-9)')
     f.add_argument('--max_rows', type=int, default=50, help='rows printed per table (default 50)')
+    f.add_argument('--summary', action='store_true',
+                   help='counts per table, change kind and column instead of the rows themselves')
 
     u = sub.add_parser('update', help='write PEST results back into an existing workbook')
     u.add_argument('workbook', help='.xlsm/.xlsx to update (sheets matched by PARNME / OBSNME columns)')
@@ -675,7 +947,8 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     args._argv = argv                 # the command line as given, for the manifest
-    {'build': build, 'dump': dump, 'update': update, 'parrep': parrep, 'init': init,
+    {'build': build, 'dump': dump, 'update': update, 'parrep': parrep, 'init': init, 'set': set_par, 'rescale': rescale,
+     'reweight': reweight,
      'validate': validate, 'provenance': provenance, 'log': log, 'bundle': bundle, 'diff': diff,
      'tempchek': tempchek, 'inschek': inschek,
      'hpstart': hpstart}[args.cmd](args)

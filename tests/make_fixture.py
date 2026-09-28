@@ -160,7 +160,8 @@ def write_par_res():
     with open(os.path.join(DATA, 'demo.par'), 'w') as f:
         f.write('single point\n')
         for r in pst.par.itertuples():
-            f.write(f'{r.PARNME:<14s} {float(r.PARVAL1) * 2:.11g}  1.0  0.0\n')
+            # PEST writes each parameter's own SCALE and OFFSET; fill_parval converts through them
+            f.write(f'{r.PARNME:<14s} {float(r.PARVAL1) * 2:.11g}  {float(r.SCALE):.1f}  {float(r.OFFSET):.1f}\n')
     with open(os.path.join(DATA, 'demo.res'), 'w') as f:
         f.write(f'{"Name":<20s} {"Group":<10s} {"Measured":>14s} {"Modelled":>14s} {"Residual":>14s} {"Weight":>10s}\n')
         for r in pst.obs.itertuples():
