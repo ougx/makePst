@@ -82,6 +82,18 @@ def test_write_read_small():
     assert to_text(q) == text
 
 
+def test_prior_naming_missing_parameter_still_writes():
+    # a PRIOR that names a parameter not in the table gets no equation; normalize() must
+    # still leave a control file that passes the pre-write validation
+    p = small_pst('regul')
+    p.par.loc[3, 'PRIOR'] = 'nosuchpar'
+    report = p.normalize().validate()
+    assert not report.errors
+    assert any("['k4']" in str(w) for w in report.warnings)
+    assert list(p.prior['PINME']) == ['k1']
+    assert '* prior information' in to_text(p)
+
+
 def test_equation_params_scientific_notation():
     from makepst.pst import equation_params
     assert equation_params('1.0 * log(k1) = 1e-3') == ['k1']

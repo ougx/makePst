@@ -1,17 +1,19 @@
 """The pestchek rules that go beyond makepst's own consistency checks.
 
-Derived from the message catalogue of PEST 17's pestchek (pestchek.F / cheksub.F), leaving
+Derived from the message catalogue of PEST 17.2's pestchek (pestchek.F / cheksub.F; the version is
+PESTCHEK_SOURCE_VERSION), with the PEST_HP control variables' limits from the PEST_HP 17 manual, leaving
 out what makepst cannot see or does not model (text-format parse errors, JUPITER derivative
 files, adaptive-regularisation "iw_" parameters, secondary and file parameters, distribution
 files). Each function returns Finding objects; the driver in checks.py collects them.
 """
+import difflib
 import re
 
 import numpy as np
 import pandas as pd
 
 from .pst import ADJUSTABLE, Pst, equation_params
-from .sections import fmt
+from .sections import ALL_SECTIONS, FIELD_SECTION, PESTCHEK_SOURCE_VERSION, extra_token, fmt, token_name
 from .writer import effective_control
 
 INCTYP = ('relative', 'absolute', 'rel_to_max')
@@ -26,6 +28,29 @@ HP_ONLY = ('run_abandon_fac', 'win_mrun_hours', 'softstophours', 'hardstophours'
 # on an option it does not recognise rather than ignoring it, and old copies of the binaries live on in run
 # folders, so a control file that works on one machine can refuse to start on another. Add entries as they
 # are met; an option missing here is not a claim that every build accepts it.
+# What PEST reads each control variable as. Flag fields (precis, lamforgive, ...) are checked against the words
+# their section accepts; the rest are text PEST does not parse as a number.
+INTEGER = set('''
+    maxcompdim numcom jacfile messfile numlam jacupdate iboundstick upvecbend noptswitch noptmax nphistp nphinored
+    nrelpar lastrun icov icor ieig ires svdmode maxsing eigwrite lsqrmode lsqr_itnlim lsqrwrite maxaui auistartopt
+    auirestitn auiholdmaxchg auinumfree nauinoaccept iregadj noptregadj uptestmin uptestlim svda_mulbpa
+    svda_scaladj svda_extsuper svda_supdercalc svda_par_excl'''.split())
+REAL = set('''
+    derzerolim rlambda1 rlamfac phiratsuf phiredlam relparmax facparmax facorig phiredswh splitswh phiredstp
+    relparstp phistopthresh eigthresh lsqr_atol lsqr_btol lsqr_conlim noauiphirat auisensrat auiphiratsuf
+    auiphirataccept phimlim phimaccept fracphim wfinit wfmin wfmax wffac wftol regweightrat regsingthresh
+    run_slow_fac run_abandon_fac win_mrun_hours jcowarnthresh jcozerothresh zerosenval hardstophours softstophours
+    reg2measrat'''.split())
+TEXT = {'phiabandon', 'absparmax', 'basepestfile', 'basejacfile'}   # phiabandon may name a file
+# Words pestchek looks for by name that are not control-data variables for makePst's schema: section-header
+# words (the PEST_HP "simultaneous parameter increments", "randomized jacobian" and "rsi" sections are kept
+# verbatim as unknown sections), and secondary / file parameters, which makePst does not model.
+# tools/rule_sources.py reports any other word pestchek reads that the schema does not know.
+PESTCHEK_IGNORED = ('group', 'groups', 'lsqr', 'name', 'param', 'random', 'row', 'rsi', 'simul', 'simultaneous',
+                    'fileparfile', 'nparsec', 'nparfile', 'nequation')
+MAXABSPARMAX = 10
+_INT = re.compile(r'^[-+]?\d+$')
+_REAL = re.compile(r'^[-+]?(\d+\.?\d*|\.\d+)([eEdD][-+]?\d+)?$')     # Fortran reads 1d-3 too
 PESTPP_VERSIONED = {
     'glm_hp_lambdas': 'accepted by pestpp-glm 5.2.27, rejected by 5.2.17',
 }
@@ -308,9 +333,17 @@ CONTROL_RULES = [
     ('numcom', lambda x: x >= 1, 'must be 1 or greater'),
     ('maxcompdim', lambda x: x >= 0, 'must not be negative'),
     ('derzerolim', lambda x: x >= 0, 'must not be negative'),
+    ('run_slow_fac', lambda x: x >= 1.2, 'must be 1.2 or greater'),
+    ('run_abandon_fac', lambda x: x == 0 or x >= 1.2, 'must be zero or 1.2 or greater'),
     ('win_mrun_hours', lambda x: x >= 0, 'must be zero or greater'),
     ('uptestmin', _between(3, 70), 'must be between 3 and 70'),
     ('uptestlim', _between(3, 150), 'must be between 3 and 150'),
+    ('jcowarnthresh', lambda x: x >= 0, 'must be zero or greater'),
+    ('jcozerothresh', lambda x: x >= 0, 'must be zero or greater'),
+    ('zerosenval', lambda x: abs(x) < 1e30, 'must have an absolute value less than 1E30'),
+    ('hardstophours', lambda x: x > 0, 'must be greater than zero'),
+    ('softstophours', lambda x: x > 0, 'must be greater than zero'),
+    ('reg2measrat', _between(0, 1, True, False), 'must be zero or more and less than one'),
     ('svdmode', lambda x: x in (0, 1, 2), 'must be 0, 1 or 2'),
     ('maxsing', lambda x: x > 0, 'must be greater than zero'),
     ('eigthresh', _between(0, 1, True, False), 'must be zero or more and less than one'),
@@ -351,9 +384,32 @@ def check_control(pst: Pst):
 
     def num(k):
         try:
-            return float(ctl[k]) if k in ctl and fmt(ctl[k]) != '' else None
+            return float(fmt(ctl[k]).lower().replace('d', 'e')) if k in ctl and fmt(ctl[k]) != '' else None
         except (TypeError, ValueError):
             return None
+
+    # what PEST can read at all: a number where it expects one, a word it knows where it expects a word
+    flags = {k: sec.flags[k] for sec in ALL_SECTIONS for k in sec.flags}
+    for k, v in ctl.items():
+        text = fmt(v)
+        if k not in FIELD_SECTION or text == '' or k == 'pestmode':
+            continue
+        if k in INTEGER and not _INT.match(text):
+            err(f'{k.upper()} must be an integer (is "{text}")')
+        elif k in REAL and not _REAL.match(text):
+            err(f'{k.upper()} must be a number (is "{text}")')
+        elif k == 'obsreref' and text.lower().startswith('obsreref_'):
+            if not re.fullmatch(r'obsreref_0*[1-9]\d*', text.lower()):
+                err(f'OBSREREF: only a positive integer (seconds) can follow "obsreref_" (is "{text}")')
+        elif k in flags and text.lower() not in flags[k]:
+            err(f'{k.upper()} must be {" or ".join(sorted(flags[k]))} (is "{text}")')
+        elif k == 'absparmax':
+            for tok in text.split():
+                m = re.fullmatch(r'absparmax\((\d+)\)=(\S+)', tok.lower())
+                if not m or not _REAL.match(m.group(2)):
+                    err(f'ABSPARMAX must be given as absparmax(n)=value (is "{tok}")')
+                elif not 1 <= int(m.group(1)) <= MAXABSPARMAX:
+                    err(f'ABSPARMAX(n): n must be 1 to {MAXABSPARMAX} (is "{tok}")')
 
     for k, ok, msg in CONTROL_RULES:
         x = num(k)
@@ -366,6 +422,16 @@ def check_control(pst: Pst):
         err('RELPARSTP must be less than RELPARMAX')
     if None not in (n['uptestmin'], n['uptestlim']) and n['uptestmin'] > n['uptestlim']:
         err('UPTESTMIN must not exceed UPTESTLIM')
+    if num('hardstophours') is not None and num('softstophours') is not None:
+        err('a value can be supplied for either HARDSTOPHOURS or SOFTSTOPHOURS, but not for both')
+    if num('jcowarnthresh') and num('jcozerothresh') and num('jcozerothresh') <= num('jcowarnthresh'):
+        err('JCOZEROTHRESH must exceed JCOWARNTHRESH when both are positive')
+    reref = str(ctl.get('obsreref', '')).lower().startswith('obsreref')
+    if str(ctl.get('orr_not_first', '')).lower() == 'orr_not_first' and not reref:
+        err('"orr_not_first" needs observation re-referencing ("obsreref") on the same line')
+    if num('zerosenval') is not None and (num('numcom') or 1) <= 1 and not reref:
+        err('ZEROSENVAL must not be supplied unless PEST uses multiple model commands for derivatives '
+            '(NUMCOM > 1) or observation re-referencing')
     if pst.pestmode == 'regularisation':
         if None not in (n['phimlim'], n['phimaccept']):
             if n['phimaccept'] <= n['phimlim']:
@@ -416,6 +482,20 @@ def check_control(pst: Pst):
     return out
 
 
+def check_unknown_control(pst: Pst):
+    """Control tokens the schema does not know: a warning each, kept as written (as for an unknown `++` option)."""
+    out = []
+    for name, (section, n) in getattr(pst, 'control_line', {}).items():
+        token = extra_token(name, pst.control.get(name))
+        close = difflib.get_close_matches(token_name(name), list(FIELD_SECTION), n=1, cutoff=0.75)
+        out.append(_finding('warning', f'{section} line {n}',
+                            f'"{token}" is not a control variable of PEST {PESTCHEK_SOURCE_VERSION}'
+                            + (f'; did you mean "{close[0]}"?' if close else '')
+                            + ' (kept as written; a newer PEST_HP may know it)'))
+    return out
+
+
 def check_extra(pst: Pst):
     """Every rule in this module."""
-    return check_control(pst) + check_groups(pst) + check_parameters(pst) + check_observations(pst) + check_prior(pst)
+    return (check_control(pst) + check_unknown_control(pst) + check_groups(pst) + check_parameters(pst)
+            + check_observations(pst) + check_prior(pst))

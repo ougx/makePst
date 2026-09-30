@@ -1,0 +1,58 @@
+name: rule sources
+
+# Is `makepst validate` still in step with PEST++? Weekly, re-read the PEST++ option parser on usgs/pestpp
+# develop and compare it with tools/snapshots/pestpp.json (see tools/rule_sources.py). A change opens an
+# issue, or updates the open one; nothing is edited or committed. PEST's pestchek is not on GitHub: run
+# `python tools/rule_sources.py pestchek --source <pest_source folder>` when a new PEST is downloaded.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"         # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  pestpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - name: Compare with the PEST++ source
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python tools/rule_sources.py pestpp --ref develop > report.txt
+          status=$?
+          cat report.txt
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          # 0 in step, 1 changed (reported below), 2 source unreadable: fail the run instead
+          [ "$status" -le 1 ]
+      - name: Open or update the issue
+        if: steps.check.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="PEST++ option parser changed upstream"
+          {
+            echo "\`python tools/rule_sources.py pestpp\` on $(date -u +%F):"
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+            echo
+            echo "Revise makepst/pestpp.py, run the tool again with --write, and commit tools/snapshots/pestpp.json."
+          } > body.md
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

@@ -6,7 +6,7 @@ import re
 import pandas as pd
 
 from .pst import OBS_COLS, PAR_COLS, PRIOR_COLS, Pst, table_lines
-from .sections import AUI, COMPUTED, CONTROL, LSQR, REGUL, SVD, SVDA, fmt
+from .sections import AUI, COMPUTED, CONTROL, LSQR, REGUL, SVD, SVDA, extra_token, fmt
 
 
 # These sections are deliberately opaque even though makePst knows where they conventionally
@@ -118,6 +118,15 @@ def _restore_unknown_sections(pst, text):
     return '\n'.join(out) + '\n'
 
 
+def _extra(pst, section):
+    """Kept unknown control tokens of `section`, as {line number: [token text]}."""
+    out = {}
+    for name, (sec, n) in getattr(pst, 'control_line', {}).items():
+        if sec == section.name and fmt(pst.control.get(name)) != '':
+            out.setdefault(n, []).append(extra_token(name, pst.control[name]))
+    return out
+
+
 def _observation_groups(pst):
     return [f'{g} {pst.obs_cov[g]}' if g in pst.obs_cov else g for g in pst.obsgp]
 
@@ -131,17 +140,17 @@ def to_text(pst: Pst, validate=True):
 
     out = 'pcf\n'
     out += ''.join(f'# {c}\n' for c in pst.comments)
-    out += CONTROL.render(ctl)
+    out += CONTROL.render(ctl, _extra(pst, CONTROL))
     if pst.use_svd:
-        out += SVD.render(ctl)
+        out += SVD.render(ctl, _extra(pst, SVD))
     if 'lsqrmode' in ctl:
-        out += LSQR.render(ctl)
+        out += LSQR.render(ctl, _extra(pst, LSQR))
     if str(ctl.get('doaui', '')).lower() == 'aui':
         aui = dict(ctl)
         aui.setdefault('maxaui', int((pst.par['PARTRANS'].isin(('log', 'none'))).sum()))
-        out += AUI.render(aui)
+        out += AUI.render(aui, _extra(pst, AUI))
     if 'basepestfile' in ctl:
-        out += SVDA.render(ctl)
+        out += SVDA.render(ctl, _extra(pst, SVDA))
     if 'sensitivity reuse' in pst.raw_sections:
         out += _raw_block(pst, 'sensitivity reuse')
 
@@ -166,7 +175,7 @@ def to_text(pst: Pst, validate=True):
     if 'predictive analysis' in pst.raw_sections:
         out += _raw_block(pst, 'predictive analysis')
     if pst.pestmode == 'regularisation':
-        out += REGUL.render(ctl)
+        out += REGUL.render(ctl, _extra(pst, REGUL))
     if 'pareto' in pst.raw_sections:
         out += _raw_block(pst, 'pareto')
     out += _pestpp_text(pst)
@@ -189,6 +198,7 @@ def effective_control(pst):
         out.update(SVDA.values(ctl))
     if pst.pestmode == 'regularisation':
         out.update(REGUL.values(ctl))
+    out.update({k: ctl[k] for k in getattr(pst, 'control_line', {}) if k in ctl})   # kept unknown tokens
     return {k: v for k, v in out.items() if (k not in COMPUTED or k == 'pestmode') and fmt(v) != ''}
 
 

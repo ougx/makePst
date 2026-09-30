@@ -161,11 +161,19 @@ def from_text(text, base_dir='.'):
     counts = {k: ctl.get(k) for k in COMPUTED}
     pst.use_svd = 'singular value decomposition' in sections or any(
         k in ctl for k in ('svdmode', 'maxsing', 'eigthresh'))
+    extras = [(CONTROL.name, ctl.pop('_extra', {}))]
     for name in list(sections):
         sec = SECTIONS.get(name)
         if sec is not None:
-            ctl.update(sec.parse(sections.pop(name)))
+            values = sec.parse(sections.pop(name))
+            extras.append((sec.name, values.pop('_extra', {})))
+            ctl.update(values)
     pst.control = {k: v for k, v in ctl.items() if k not in COMPUTED and not k.startswith('_')}
+    for section, lines in extras:
+        for n, tokens in lines.items():
+            for key, value in tokens:
+                pst.control[key] = value
+                pst.control_line[key] = (section, n)
 
     def take(section):
         """Body of a classic section, or the table of its external variant (None if absent)."""

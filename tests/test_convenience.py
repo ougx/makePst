@@ -58,3 +58,56 @@ def test_build_table_warns_on_missing_formula_cache(tmp_path):
         warnings.simplefilter('always')
         load_table(f'{book},PAR')
     assert any('no cached value' in str(w.message) for w in caught)
+
+
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+
+
+def _fixture_book(tmp_path):
+    import shutil
+    shutil.copy(os.path.join(DATA, 'demo.xlsx'), tmp_path / 'demo.xlsx')
+    return tmp_path / 'demo.xlsx'
+
+
+def test_build_dry_run_reports_and_writes_nothing(tmp_path, capsys):
+    book = _fixture_book(tmp_path)
+    with pytest.raises(SystemExit) as exc:                  # the fixture's template files are not here
+        main(['build', str(book), '--dry_run'])
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert 'template file not found' in out and '(dry run: nothing written)' in out
+    assert sorted(os.listdir(tmp_path)) == ['demo.xlsx']      # no control file, dump.tpl or manifest
+
+
+def test_build_dry_run_from_tables_named_on_the_command_line(tmp_path, capsys):
+    book = str(_fixture_book(tmp_path))
+    argv = ['build', str(tmp_path / 'new.pst'), 'regul', '--set_ctl_xls', f'{book},CONTROL',
+            '--add_pargp_xls', f'{book},PARGP', '--add_par_xls', f'{book},PAR_*', '--add_obs_xls', f'{book},OBS_*',
+            '--add_pp_xls', f'{book},PPcntl', '--dry_run']
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert 'no template files' in out and 'no model command line' in out     # left out of this command
+    assert 'new.pst: 3 errors' in out and '(dry run: nothing written)' in out
+    assert not (tmp_path / 'new.pst').exists() and not (tmp_path / 'new.pst.manifest.json').exists()
+
+
+def test_validate_judges_a_workbook_as_build_would_write_it(tmp_path, capsys):
+    """Regularisation equations come from PRIOR/WEIGHT columns when building; checking the tables before
+    that reported a missing "regul" group and ungenerated prior information that build never leaves."""
+    book = _fixture_book(tmp_path)
+    with pytest.raises(SystemExit):
+        main(['validate', str(book)])
+    out = capsys.readouterr().out
+    assert 'whose name starts with "regul"' not in out
+    assert 'have not been generated' not in out
+    assert 'Rebuild prior information' in out and '(done by build)' in out
+
+
+def test_workbook_without_build_sheet_points_at_dry_run(tmp_path):
+    book = tmp_path / 'plain.xlsx'
+    openpyxl.Workbook().save(book)
+    with pytest.raises(SystemExit) as exc:
+        main(['build', str(book)])
+    assert 'has no BUILD sheet' in str(exc.value) and '--dry_run' in str(exc.value)

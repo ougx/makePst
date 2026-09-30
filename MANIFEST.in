@@ -1,5 +1,6 @@
 include LICENSE README.md CHANGELOG.md CITATION.cff
 recursive-include tests *.py *.xlsx *.pst *.par *.res *.csv
+recursive-include tools *.py *.json
 recursive-include examples/minimal *.csv *.py *.tpl *.ins *.in *.out *.par *.res
 prune examples/mnnrd
 global-exclude __pycache__ *.py[cod] *.manifest.json

@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+- `tools/rule_sources.py`: are `validate`'s rules still current? `pestpp` re-reads PEST++'s option
+  parser from GitHub (names, aliases, types, choices, deprecations); `pestchek --source DIR` reads a
+  PEST download's `pestchek.F` / `cheksub.F` (control-data keywords and every message). Each is
+  compared with the reviewed snapshot in `tools/snapshots/` and with makePst's own tables; exit 1 on
+  a change, 2 when the source cannot be read; `--write` records a reviewed source. Tests hold
+  `makepst/pestpp.py` and the control-data schema to the snapshots, and a weekly GitHub workflow
+  (`.github/workflows/rule-sources.yml`) opens an issue when PEST++'s parser changes. The PEST++
+  registry is unchanged; its provenance now names commit 02e1455 (5.2.29) - the commit named before,
+  ad8428d, has identical option parsing but is labelled 5.2.28 in the source.
+
+- `build --dry_run`: the `validate` report on the control file a build would write, from a workbook's
+  BUILD sheet or from tables named on the command line; nothing is written, no manifest; exit 1 on
+  errors. A workbook with no BUILD sheet now says how to name its tables and check them this way.
+- `validate` on a workbook judges it as `build` would write it, after the same normalization
+  (regularisation equations from `PRIOR`/`WEIGHT`, unused groups removed, ties to fixed parameters
+  fixed), listing those as notes. It used to judge the tables before that and report errors building
+  removes: a regularisation file with no "regul" group, prior information not generated.
+
+- PEST_HP control variables are treated as `++` options are: a control-data token makePst does not
+  know (`newhpvar=7`, a new flag) is kept with the line it came from and written back there, instead
+  of being dropped, and `validate` warns about it with the closest known name. `dump` writes it to
+  the CONTROL sheet with its line (`control data line 4`), so `build` puts it back.
+- Every PEST_HP variable PEST 17.2's pestchek reads is now known: `run_slow_fac`, `run_abandon_fac`,
+  `jcowarnthresh`, `jcozerothresh`, `zerosenval`, `hardstophours`, `softstophours`, `reg2measrat`,
+  `orr_not_first`, and `obsreref_N`; `name = value` with spaces around `=` is read, as PEST_HP does.
+- `validate` checks that PEST can read each control value: an integer or a number where one is
+  expected (Fortran `1d-3` included), a known word for `precis`, `dpoint` and the other flags,
+  `absparmax(n)=value` with n 1-10; and the PEST_HP ranges and combinations (`RUN_ABANDON_FAC` 0 or
+  at least 1.2, not both stop-hours variables, `JCOZEROTHRESH` above `JCOWARNTHRESH`, `REG2MEASRAT`
+  below 1, `orr_not_first` and `ZEROSENVAL` only with what they need).
+- The rule sources are pinned and reported: `PESTCHEK_SOURCE_VERSION` (17.2) beside
+  `PESTPP_REGISTRY_VERSION` (5.2.29); `validate` prints both and every manifest records them under
+  `checked_against`.
+
 ## 0.4.0 (2026-09-27)
 
 - `rescale` / `Pst.rescale_par()`: move parameter values into `SCALE` so each selected parameter

@@ -1,6 +1,6 @@
 """PEST++ `++` options: what PEST++ accepts, and a check of a control file's options against it.
 
-The registry is read off PEST++ 5.2.29 (usgs/pestpp develop, commit ad8428d, 2026-07-09), from
+The registry is read off PEST++ 5.2.29 (usgs/pestpp develop, commit 02e1455, 2026-09-03), from
 PestppOptions::assign_value_by_key and the ies / da / mou / sqp functions it falls through to in
 src/libs/pestpp_common/pest_data_structs.cpp. What that code does on start-up decides the severities:
 
@@ -14,6 +14,9 @@ src/libs/pestpp_common/pest_data_structs.cpp. What that code does on start-up de
 
 `++` lines go to PestppOptions only. Control variables (noptmax, maxsing, ...) are accepted in a
 version-2 file's `* control data keyword` section, not as `++` options.
+
+`python tools/rule_sources.py pestpp` re-reads that source and reports what has changed since, and whether
+the names, aliases, types and choices below still match what was extracted (tools/snapshots/pestpp.json).
 """
 import difflib
 import re

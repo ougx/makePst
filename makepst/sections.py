@@ -4,6 +4,10 @@ Each section is a list of lines, each line a tuple of field names in the
 order PEST expects them.  One table drives both rendering (Pst -> text) and
 parsing (text -> Pst), so the writer and the reader cannot disagree about
 where a field lives.
+
+The fields, including the PEST_HP name=value tokens and flags, are those PEST 17.2's pestchek
+(pestchek.F) reads. A token this schema does not know - a PEST_HP variable added after that
+release, say - is kept with the line it came from and written back there (see Section.parse).
 """
 import math
 import re
@@ -13,8 +17,12 @@ import numpy as np
 
 FLOATFMT = '.11g'
 
-# PEST_HP extensions written as name=value tokens
-KEYED = {'win_mrun_hours', 'uptestmin', 'uptestlim'}
+# the PEST release whose pestchek source the control-data schema and the rules in rules.py were read from
+PESTCHEK_SOURCE_VERSION = '17.2'
+
+# name=value tokens: PEST finds them anywhere on their line, so they take no positional slot
+KEYED = {'run_slow_fac', 'run_abandon_fac', 'win_mrun_hours', 'uptestmin', 'uptestlim',
+         'jcowarnthresh', 'jcozerothresh', 'zerosenval', 'hardstophours', 'softstophours', 'reg2measrat'}
 
 # derived from the data tables at write time; never taken from the user
 COMPUTED = {'npar', 'nobs', 'npargp', 'nprior', 'nobsgp', 'ntplfle', 'ninsfle', 'pestmode'}
@@ -68,6 +76,17 @@ def _onoff(name):
     return {name, 'no' + name}
 
 
+def token_name(tok):
+    """The variable a control-data token names: 'win_mrun_hours' for 'win_mrun_hours=2', the word itself for a flag."""
+    return re.split(r'[=(]', tok, maxsplit=1)[0].lower()
+
+
+def extra_token(name, value):
+    """Text of a kept unknown token: `name=value`, or the bare word when the value is the name (a flag)."""
+    s = fmt(value)
+    return name if s.lower() == name else f'{name}={s}'
+
+
 class Section:
     def __init__(self, header, lines, defaults=None, flags=None, comments=None, derive=None):
         self.header = header
@@ -95,8 +114,17 @@ class Section:
             self.derive(v)
         return v
 
-    def render(self, user):
+    def flag_of(self, keys, low):
+        """The field among `keys` that the word `low` sets, identified by its text, or None."""
+        for k in keys:
+            if low in self.flags.get(k, ()) or (k == 'obsreref' and re.fullmatch(r'obsreref_\d+', low)):
+                return k
+        return None
+
+    def render(self, user, extra=None):
+        """Section text; `extra` maps a line number (1-based) to kept unknown tokens written at its end."""
         v = self.values(user)
+        extra = extra or {}
         out = [self.header]
         for i, keys in enumerate(self.lines):
             fields = []
@@ -121,10 +149,13 @@ class Section:
                 if k in KEYED:
                     s = f'{k}={s}'
                 fields.append(f'{s:<10}')
+            fields += extra.get(i + 1, [])
             line = ' '.join(fields).rstrip()
             if i in self.comments:
                 line = f'{line:<80}  {self.comments[i]}'
             out.append(line)
+        for n in sorted(k for k in extra if k > len(self.lines)):
+            out.append(' '.join(extra[n]))
         return '\n'.join(out) + '\n'
 
     def parse(self, text_lines):
@@ -132,36 +163,46 @@ class Section:
 
         Tokens are matched, in order of preference: name=value tokens, text
         flags identified by their value, then numeric tokens positionally.
+        A token none of these explains is kept, not dropped: '_extra' maps it,
+        as (name, value), to its line number (1-based), so the writer can put it
+        back where it was. A newer PEST_HP than this schema may know it.
         """
-        values = {}
-        for i, keys in enumerate(self.lines):
-            if i >= len(text_lines):
-                break
-            tokens = text_lines[i].split('#', 1)[0].split()
+        values, extra = {}, {}
+        where = {k: n for n, keys in enumerate(self.lines, 1) for k in keys}
+        for i, text in enumerate(text_lines):
+            keys = self.lines[i] if i < len(self.lines) else ()
+            # PEST_HP accepts spaces around the '=' of a name=value token ('run_slow_fac = 3')
+            tokens = re.sub(r'\s*=\s*', '=', text.split('#', 1)[0]).split()
             positional = [k for k in keys if k not in self.flags and k not in KEYED]
             for tok in tokens:
                 low = tok.lower()
                 if '=' in tok:
-                    base = re.split(r'[=(]', tok, maxsplit=1)[0].lower()
+                    base = token_name(tok)
                     if base in KEYED:
+                        if base in values:
+                            warnings.warn(f'{self.header}: {base.upper()} appears twice; the last value is kept')
+                        elif base not in keys:
+                            warnings.warn(f'{self.header}: {tok!r} belongs on line {where[base]}, not line {i + 1}; '
+                                          f'it is written there')
                         values[base] = _num(tok.split('=', 1)[1])
                     elif base in keys:
                         values[base] = (values.get(base, '') + ' ' + tok).strip()
                     else:
-                        warnings.warn(f'{self.header}: unrecognised token {tok!r}')
-                        values.setdefault('_unparsed', []).append(tok)
+                        name, value = tok.split('=', 1)
+                        extra.setdefault(i + 1, []).append((name.lower(), _num(value)))
                     if base in positional:
                         positional.remove(base)
                     continue
-                flag = next((k for k in keys if low in self.flags.get(k, ())), None)
+                flag = self.flag_of(keys, low)
                 if flag is not None:
                     values[flag] = low
                     continue
                 if positional:
                     values[positional.pop(0)] = _num(tok)
                 else:
-                    warnings.warn(f'{self.header}: extra token {tok!r}')
-                    values.setdefault('_unparsed', []).append(tok)
+                    extra.setdefault(i + 1, []).append((low, _num(tok)))
+        if extra:
+            values['_extra'] = extra
         return values
 
 
@@ -170,13 +211,15 @@ CONTROL = Section(
     lines=[
         ('rstfle', 'pestmode'),
         ('npar', 'nobs', 'npargp', 'nprior', 'nobsgp', 'maxcompdim', 'derzerolim'),
-        ('ntplfle', 'ninsfle', 'precis', 'dpoint', 'numcom', 'jacfile', 'messfile', 'obsreref'),
+        ('ntplfle', 'ninsfle', 'precis', 'dpoint', 'numcom', 'jacfile', 'messfile', 'obsreref',
+         'orr_not_first'),
         ('rlambda1', 'rlamfac', 'phiratsuf', 'phiredlam', 'numlam', 'jacupdate',
-         'lamforgive', 'derforgive', 'win_mrun_hours', 'uptestmin', 'uptestlim'),
+         'lamforgive', 'derforgive', 'run_slow_fac', 'run_abandon_fac', 'win_mrun_hours', 'uptestmin', 'uptestlim'),
         ('relparmax', 'facparmax', 'facorig', 'iboundstick', 'upvecbend', 'absparmax'),
-        ('phiredswh', 'noptswitch', 'splitswh', 'doaui', 'dosenreuse', 'boundscale'),
+        ('phiredswh', 'noptswitch', 'splitswh', 'doaui', 'dosenreuse', 'boundscale',
+         'jcowarnthresh', 'jcozerothresh', 'zerosenval'),
         ('noptmax', 'phiredstp', 'nphistp', 'nphinored', 'relparstp', 'nrelpar',
-         'phistopthresh', 'lastrun', 'phiabandon'),
+         'phistopthresh', 'lastrun', 'phiabandon', 'hardstophours', 'softstophours'),
         ('icov', 'icor', 'ieig', 'ires', 'jcosave', 'verboserec', 'jcosaveitn',
          'reisaveitn', 'parsaveitn', 'parsaverun', 'rrfsave'),
     ],
@@ -197,6 +240,7 @@ CONTROL = Section(
         'precis': {'single', 'double'},
         'dpoint': _onoff('point'),
         'obsreref': _onoff('obsreref'),
+        'orr_not_first': {'orr_not_first'},
         'lamforgive': _onoff('lamforgive'),
         'derforgive': _onoff('derforgive'),
         'doaui': _onoff('aui'),
@@ -257,7 +301,7 @@ def _derive_regul(v):
 REGUL = Section(
     '* regularisation',
     lines=[
-        ('phimlim', 'phimaccept', 'fracphim', 'memsave'),
+        ('phimlim', 'phimaccept', 'fracphim', 'memsave', 'reg2measrat'),
         ('wfinit', 'wfmin', 'wfmax', 'linreg', 'regcontinue'),
         ('wffac', 'wftol', 'iregadj', 'noptregadj', 'regweightrat', 'regsingthresh'),
     ],

@@ -31,6 +31,14 @@ def _file_record(path):
     }
 
 
+def checked_against():
+    """The releases makePst's checks were read from: PEST's pestchek (control data, PEST_HP variables) and
+    PEST++'s option list. A check is only as current as these; the manifest records them with each output."""
+    from .pestpp import PESTPP_REGISTRY_VERSION
+    from .sections import PESTCHEK_SOURCE_VERSION
+    return {'pestchek': PESTCHEK_SOURCE_VERSION, 'pestpp': PESTPP_REGISTRY_VERSION}
+
+
 class Manifest:
     def __init__(self, command, argv=None):
         from . import __version__
@@ -47,6 +55,7 @@ class Manifest:
             'python': platform.python_version(),
             'pandas': pandas.__version__,
             'openpyxl': openpyxl.__version__,
+            'checked_against': checked_against(),
             'platform': platform.platform(),
             'sources': [],
             'output': None,

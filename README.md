@@ -532,7 +532,8 @@ explicitly before writing.
 | parameter group defined but unused | fix available: remove the group |
 | prior equation referencing a fixed, tied or missing parameter | error and fix available: rebuild prior information, dropping those equations |
 | adjustable `PARVAL1` outside `[PARLBND, PARUBND]` | warning |
-| control value that is computed (`npar` …) or unknown | ignored (warning) |
+| control value that is computed (`npar` …) | ignored (warning) |
+| control variable makePst does not know (a newer PEST_HP keyword): kept on the line it came from; a CONTROL-sheet row gives that line in `LINE` (`control data line 4`) or is ignored | warning |
 
 `makepst validate` uses the same table checks and adds the **pestchek-style report**: it
 changes nothing, looks beyond the tables at the files the control file points to, and exits 1
@@ -551,7 +552,9 @@ makepst validate tr13.xlsx            # a workbook with a BUILD sheet is built f
 | malformed prior equation; non-numeric right-hand side; `log()` used on a non-log parameter or vice versa | error |
 | `DERCOM` beyond the number of model command lines | error |
 | name longer than PEST's limit (12 parameter / 20 observation / 12 group; PEST++ allows 200) | warning |
-| **pestchek's rules** (from PEST 17's `pestchek.F` / `cheksub.F`): `PARCHGLIM` vocabulary and `absolute(n)` needing `absparmax(n)=`; log parameters factor-limited with positive values; factor-limited bounds of one sign and non-zero; `SCALE ≠ 0`; tied to itself, tied or parent with initial value 0; group `none` reserved; all parameters fixed/tied; `INCTYP` / `FORCEN` / `DERMTHD` vocabularies and their compatibility; split-column ranges; duplicate groups; `dum` as an observation name; prior weights, labels (≤ 20, not an observation name), duplicated parameters, all-zero factors, group `predict`; regularisation needs a `regul*` group, prediction exactly one `predict` observation; ~60 control-variable range and consistency rules (`RLAMFAC`, `PHIRATSUF`, `FACPARMAX`, `NPHISTP`, `RELPARSTP < RELPARMAX`, `EIGTHRESH`, `PHIMLIM < PHIMACCEPT < 1.2·PHIMLIM`, `WFMIN ≤ WFINIT ≤ WFMAX`, `UPTESTMIN`/`UPTESTLIM`, SVD vs AUI vs LSQR exclusivity, …) | error |
+| **pestchek's rules** (from PEST 17.2's `pestchek.F` / `cheksub.F`): `PARCHGLIM` vocabulary and `absolute(n)` needing `absparmax(n)=`; log parameters factor-limited with positive values; factor-limited bounds of one sign and non-zero; `SCALE ≠ 0`; tied to itself, tied or parent with initial value 0; group `none` reserved; all parameters fixed/tied; `INCTYP` / `FORCEN` / `DERMTHD` vocabularies and their compatibility; split-column ranges; duplicate groups; `dum` as an observation name; prior weights, labels (≤ 20, not an observation name), duplicated parameters, all-zero factors, group `predict`; regularisation needs a `regul*` group, prediction exactly one `predict` observation; ~60 control-variable range and consistency rules (`RLAMFAC`, `PHIRATSUF`, `FACPARMAX`, `NPHISTP`, `RELPARSTP < RELPARMAX`, `EIGTHRESH`, `PHIMLIM < PHIMACCEPT < 1.2·PHIMLIM`, `WFMIN ≤ WFINIT ≤ WFMAX`, `UPTESTMIN`/`UPTESTLIM`, SVD vs AUI vs LSQR exclusivity, …) | error |
+| control value PEST cannot read: not an integer or a number where one is expected (Fortran `1d-3` is fine), a word outside its field's vocabulary (`precis`, `dpoint`, `obsreref`, …), `absparmax(n)=` malformed or n outside 1-10; the PEST_HP limits and combinations (`RUN_SLOW_FAC`, `RUN_ABANDON_FAC`, `HARDSTOPHOURS` / `SOFTSTOPHOURS` not both, `JCOZEROTHRESH` above `JCOWARNTHRESH`, `ZEROSENVAL`, `REG2MEASRAT` below 1, `orr_not_first` only with `obsreref`) | error |
+| control-data token not in PEST 17.2's pestchek — kept as written, with the closest known name (`"win_mrun_hour=2" … did you mean "win_mrun_hours"?`) | warning |
 | pestchek's warnings: derivative increment larger than a third of the range; initial value 0 with a relative increment; group with only fixed/tied parameters; log parameters with a non-relative increment; observation group listed but empty (dropped on write); `MAXSING` above the adjustable-parameter count; more than 300 adjustable parameters with `ICOV`/`ICOR`/`IEIG` on; `NOPTMAX 0` | warning |
 | PEST_HP-only control variables present (`WIN_MRUN_HOURS`, `UPTESTMIN`, `RRFSAVE`, …; plain PEST needs `/hpstart`); observation group whose weights are all zero | note |
 | template: parameter space narrower than 3 characters or containing a tab | error |
@@ -573,6 +576,22 @@ The `++` checks use the option list in `makepst/pestpp.py`, read off PEST++ 5.2.
 too, without refusing to write: plain PEST ignores `++` lines, and a newer PEST++ may know an
 option this list does not. PEST++ itself stops on an option it does not accept, so fix or remove
 what is flagged before a run.
+
+`validate` prints the two releases its rules were read from, and every manifest records them
+(`checked_against`). Whether they are still current is checked by `tools/rule_sources.py`, which
+re-reads the upstream source and compares it with the snapshot the rules were written against
+(`tools/snapshots/`), exiting 1 on any change:
+
+```
+python tools/rule_sources.py pestpp                        # usgs/pestpp develop, from GitHub
+python tools/rule_sources.py pestchek --source pest_source  # the source folder of a PEST download
+```
+
+It reports added and removed `++` options, aliases, value types and choices; for PEST, the
+control-data keywords pestchek reads and its messages (each message is a rule); and anything
+makePst's own tables no longer agree with. It edits nothing: port what changed, then run it
+again with `--write` to record the new source as reviewed, and the tests hold the code to that
+snapshot. The PEST++ check runs weekly on GitHub and opens an issue when the parser changes.
 
 The `--outputs` interpreter follows the PEST manual (primary and secondary markers, `l`, `w`,
 `t`, `!name!`, `[name]c1:c2`, `(name)c1:c2`, `dum`, `&` continuation) and catches the classic
@@ -707,6 +726,7 @@ makepst/
   starter.py        the `init` workbook: control-variable descriptions, example rows, drop-downs
 examples/minimal/   the tutorial inputs
 tests/              suite + fixture generator
+tools/              rule_sources.py (are the rules current with PEST / PEST++?) and its snapshots
 ```
 
 ## Releasing

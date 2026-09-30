@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .sections import COMPUTED, FIELD_SECTION, _num, fmt, is_number, normalize_mode
+from .sections import COMPUTED, FIELD_SECTION, SECTIONS, _num, fmt, is_number, normalize_mode
 
 PAR_COLS = 'PARNME PARTRANS PARCHGLIM PARVAL1 PARLBND PARUBND PARGP SCALE OFFSET DERCOM'.split()
 PAR_EXTRA = ['TIETO', 'PRIOR', 'WEIGHT']          # optional columns carried on self.par
@@ -29,6 +29,14 @@ _EQ_SPLIT = re.compile(r'[\s()*=/]+|(?<![0-9][eE])[-+]')
 
 def _clean(s):
     return s.astype(str).str.strip().str.lower()
+
+
+def _control_place(text):
+    """('control data', 4) from a CONTROL sheet's LINE cell such as 'control data line 4', else None."""
+    m = re.fullmatch(r'\*?\s*(.*?)[\s,]+(?:line\s*)?(\d+)', str(text or '').strip().lower())
+    if m and m.group(1) in SECTIONS and int(m.group(2)) > 0:
+        return SECTIONS[m.group(1)].name, int(m.group(2))
+    return None
 
 
 def _is_storage(names):
@@ -185,6 +193,7 @@ class Pst:
         self.ss = ss                    # steady state: drop storage (ss*/sy*) parameters and groups
         self.comments = []              # '# ...' lines written after 'pcf'
         self.control = {}               # user values for every control-style section, flat
+        self.control_line = {}          # control tokens the schema does not know: name -> (section, line number)
         self.use_svd = True
         self.par = _empty(PAR_COLS)
         self.pargp = _empty(PARGP_COLS)
@@ -246,11 +255,16 @@ class Pst:
     # ------------------------------------------------------------------ control
     def set_control(self, values):
         """Set control-style values from a dict or a CONTROL sheet (NAME/VALUE columns)."""
+        lines = {}
         if isinstance(values, pd.DataFrame):
             df = values.iloc[:, :4].copy()
             df.columns = ['LINE', 'NAME', 'DEFAULT', 'VALUE'][:df.shape[1]]
-            values = {str(r.NAME).strip().lower(): r.VALUE
-                      for r in df.dropna(subset=['NAME', 'VALUE']).itertuples()}
+            rows = df.dropna(subset=['NAME', 'VALUE']).itertuples()
+            values = {}
+            for r in rows:
+                name = str(r.NAME).strip().lower()
+                values[name] = r.VALUE
+                lines[name] = getattr(r, 'LINE', None)
         for k, v in values.items():
             k = str(k).strip().lower()
             if k == 'pestmode':
@@ -258,7 +272,16 @@ class Pst:
             elif k in COMPUTED:
                 warnings.warn(f'control value {k}={v!r} ignored; it is computed from the tables')
             elif k not in FIELD_SECTION:
-                warnings.warn(f'unknown control variable {k!r} ignored')
+                # A token this makePst does not know (a newer PEST_HP variable, say) is kept, like an unknown
+                # `++` option - but PEST reads it only on its own line, so it needs one: a control file gives
+                # it, a CONTROL sheet says it in the LINE column ('control data line 4').
+                place = _control_place(lines.get(k)) or self.control_line.get(k)
+                if place is None:
+                    warnings.warn(f'unknown control variable {k!r} ignored: give the line it belongs on, '
+                                  f"as 'control data line 4' in the CONTROL sheet's LINE column")
+                elif fmt(v) != '':
+                    self.control[k] = _num(v) if isinstance(v, str) else v
+                    self.control_line[k] = place
             elif fmt(v) != '':
                 self.control[k] = _num(v) if isinstance(v, str) else v   # csv gives strings
 
@@ -632,8 +655,8 @@ class Pst:
                     'tied_to_fixed', 'Convert parameters tied to fixed parameters to fixed', fixed))
 
         prior_rows = []
+        adjustable = set(self.par.loc[self.par['PARTRANS'].isin(ADJUSTABLE), 'PARNME'])
         if self.nprior:
-            adjustable = set(self.par.loc[self.par['PARTRANS'].isin(ADJUSTABLE), 'PARNME'])
             for row in self.prior.itertuples():
                 refs = equation_params(str(row.EQ))
                 if any(name not in adjustable for name in refs):
@@ -644,6 +667,17 @@ class Pst:
                 warnings.simplefilter('always')
                 expected = self._auto_prior()
             report.warnings.extend(Finding('warning', 'prior information', str(w.message)) for w in caught)
+            # _build_prior drops a PRIOR that names a fixed, tied or missing parameter, so
+            # compare against what it would keep, or normalize() could never satisfy this check
+            buildable = expected['EQ'].map(
+                lambda eq: all(p in adjustable for p in equation_params(eq))).astype(bool)
+            if (~buildable).any():
+                skipped = expected.loc[~buildable, 'PINME'].tolist()
+                report.warnings.append(Finding(
+                    'warning', 'prior information',
+                    f'{len(skipped)} PRIOR entries name a fixed, tied or missing parameter and '
+                    f'get no equation: {skipped[:5]}'))
+            expected = expected[buildable]
             current = self.prior[self.prior['PINME'].isin(self._auto_labels)]
             manual = self.prior[~self.prior['PINME'].isin(self._auto_labels)]
             collisions = tuple(sorted(set(expected['PINME']) & set(manual['PINME'])))

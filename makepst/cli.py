@@ -49,6 +49,8 @@ def _build_parser(p):
     p.add_argument('--no_dump_tpl', action='store_true', help="don't write dump.tpl next to the pst")
     p.add_argument('--no_manifest', action='store_true', help="don't write <pst>.manifest.json")
     p.add_argument('--out', metavar='PST', help='with a workbook: where to write (default: the name in the BUILD sheet)')
+    p.add_argument('--dry_run', action='store_true',
+                   help="report as `makepst validate` would on the control file this builds; write nothing")
     fmt_ = p.add_mutually_exclusive_group()
     fmt_.add_argument('--v2', action='store_true', help='write a PEST++ version-2 file (external csv tables beside it)')
     fmt_.add_argument('--v1', action='store_true', help='write the classic format (default for tables)')
@@ -111,15 +113,19 @@ def _finish_pst(pst, path, manifest, dump_tpl, version=None, eol=None):
 
 
 def build(args):
-    manifest = None if args.no_manifest else Manifest('build', args._argv)
+    manifest = None if args.no_manifest or args.dry_run else Manifest('build', args._argv)
     if args.pstfile.lower().endswith(WORKBOOK_EXT):
         # `makepst build book.xlsx [--out x.pst]`: run the command in the workbook's BUILD sheet
         pst, ns = build_from_workbook(args.pstfile, manifest)
+        if args.dry_run:
+            return check_report(pst, args.pstfile, built=True, dry_run=True)
         out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.pstfile)), ns.pstfile)
         _finish_pst(pst, out, manifest, dump_tpl=not (args.no_dump_tpl or ns.no_dump_tpl),
                     version=_version(args) or _version(ns))
         return
     pst = build_pst(args, manifest)
+    if args.dry_run:
+        return check_report(pst, args.pstfile, built=True, dry_run=True)
     _finish_pst(pst, args.pstfile, manifest, dump_tpl=not args.no_dump_tpl, version=_version(args))
 
 
@@ -130,8 +136,10 @@ def build_from_workbook(book, manifest=None):
     try:
         rows = pd.read_excel(book, 'BUILD', engine='openpyxl').iloc[:, 0].dropna()
     except ValueError:
-        raise SystemExit(f'{book} has no BUILD sheet; add one holding the build command '
-                         f'(as `makepst dump` does), or use `makepst build ... --fill_parval`') from None
+        raise SystemExit(f'{book} has no BUILD sheet; add one holding the build command (as `makepst dump` '
+                         f'does), or name the tables on the command line: `makepst build OUT.pst --set_ctl_xls '
+                         f'"{os.path.basename(book)},CONTROL" --add_par_xls ...`, with --dry_run to check them '
+                         f'without writing') from None
     argv = [a.strip('"') for a in shlex.split(' '.join(str(r) for r in rows), posix=False)]
     while argv and (argv[0].lower() in ('python', 'makepst', 'build') or argv[0].lower().endswith('makepst.py')):
         argv.pop(0)
@@ -403,27 +411,46 @@ def guess_base_dir(pst, target):
 
 def validate(args):
     """pestchek-style report for a control file or a workbook (built via its BUILD sheet)."""
-    from .checks import Finding, summary, validate as run_checks
     target = args.target
     if target.lower().endswith(WORKBOOK_EXT):
-        pst, _ = build_from_workbook(target)
-        pst_path = None
+        check_report(build_from_workbook(target)[0], target, built=True, base_dir=args.base_dir,
+                     outputs=args.outputs, quiet=args.quiet, strict=args.strict)
     else:
-        pst = read_pst(target)
-        pst_path = target
-    base = args.base_dir or guess_base_dir(pst, target)
-    findings = run_checks(pst, base_dir=base, pst_path=pst_path, outputs=args.outputs)
-    findings += [Finding('info', 'normalization', str(fix)) for fix in pst.validate().fixes_available]
-    if not args.base_dir and not args.quiet:
+        check_report(read_pst(target), target, pst_path=target, base_dir=args.base_dir,
+                     outputs=args.outputs, quiet=args.quiet, strict=args.strict)
+
+
+def check_report(pst, target, built=False, pst_path=None, base_dir=None, outputs=False, quiet=False,
+                 strict=False, dry_run=False):
+    """Print the validate report for `pst`; exit 1 on errors (or warnings with `strict`).
+
+    `built`: the Pst comes from tables, not from a control file. It is then judged as `build` would write it,
+    after the same normalization (regularisation equations from PRIOR/WEIGHT, unused groups removed, ...);
+    judging the tables before it would report errors that building removes. The fixes are listed as notes.
+    """
+    from .checks import Finding, summary, validate as run_checks
+    from .provenance import checked_against
+    fixes = pst.validate().fixes_available
+    if built:
+        pst.normalize()
+        notes = [Finding('info', 'normalization', f'{fix} (done by build)') for fix in fixes]
+    else:
+        notes = [Finding('info', 'normalization', str(fix)) for fix in fixes]
+    base = base_dir or guess_base_dir(pst, target)
+    findings = run_checks(pst, base_dir=base, pst_path=pst_path, outputs=outputs) + notes
+    if not base_dir and not quiet:
         print(f'INFO    file paths resolved relative to {base} (override with --base_dir)')
+    if not quiet:
+        v = checked_against()
+        print(f"INFO    rules from PEST {v['pestchek']}'s pestchek and PEST++ {v['pestpp']}'s options")
     order = {'error': 0, 'warning': 1, 'info': 2}
     for f in sorted(findings, key=lambda f: order[f.severity]):
-        if f.severity == 'info' and args.quiet:
+        if f.severity == 'info' and quiet:
             continue
         print(f)
     n, text = summary(findings)
-    print(f'{target}: {text}')
-    if n['error'] or (args.strict and n['warning']):
+    print(f'{target}: {text}' + (' (dry run: nothing written)' if dry_run else ''))
+    if n['error'] or (strict and n['warning']):
         raise SystemExit(1)
 
 

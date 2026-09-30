@@ -86,6 +86,9 @@ def control_table(pst: Pst):
                 val = pst.control.get(k)
             default = pst.counts.get(k, sec.defaults.get(k))
             rows.append((sec.name, k, default, val))
+    # tokens this makePst does not know, kept with the line PEST reads them on so build puts them back there
+    for k, (section, n) in getattr(pst, 'control_line', {}).items():
+        rows.append((f'{section} line {n}', k, None, pst.control.get(k)))
     return pd.DataFrame(rows, columns=['LINE', 'NAME', 'DEFAULT', 'VALUE'])
 
 
