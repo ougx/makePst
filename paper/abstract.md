@@ -1,0 +1,1 @@
+makePst links spreadsheet calibration records with PEST-family control files through a reproducible command-line workflow. It supports control-file construction, validation, semantic comparison, provenance tracking, and the return of calibration results to workbooks while preserving existing formulas.
