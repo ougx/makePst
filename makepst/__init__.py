@@ -3,7 +3,7 @@ try:                                        # the installed package's metadata (
     from importlib.metadata import version as _dist_version
     __version__ = _dist_version('makepst')
 except Exception:                           # a checkout run without installing
-    __version__ = '0.4.0'
+    __version__ = '0.5.0'
 
 from .excel import load_table, to_workbook, update_workbook
 from .hpstart import write_hpstart

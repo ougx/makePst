@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-09-29)
 
 - `tools/rule_sources.py`: are `validate`'s rules still current? `pestpp` re-reads PEST++'s option
   parser from GitHub (names, aliases, types, choices, deprecations); `pestchek --source DIR` reads a

@@ -455,8 +455,8 @@ the workbook?" even after the file was renamed or overwritten. `--check` adds a 
 `provenance`: `unchanged` / `changed` / `missing`.
 
 ```
-2026-09-19 21:14 build      pest/tr13.pst <- tr13.xlsx  [1068 par 41747 obs 159 prior]  makepst 0.4.0
-2026-09-21 08:10 update     tr13-xlwings.xlsx <- tr13.xlsx, tr13.par  [1068 rows in 8 sheets]  makepst 0.4.0
+2026-09-19 21:14 build      pest/tr13.pst <- tr13.xlsx  [1068 par 41747 obs 159 prior]  makepst 0.5.0
+2026-09-21 08:10 update     tr13-xlwings.xlsx <- tr13.xlsx, tr13.par  [1068 rows in 8 sheets]  makepst 0.5.0
 ```
 
 ### bundle — a run, zipped for review
@@ -611,12 +611,13 @@ from?" after the fact:
 
 ```json
 {
-  "makepst": "0.4.0",
+  "makepst": "0.5.0",
   "command": "build",
   "argv": ["build", "tr13.pst", "regul", "--set_ctl_xls", "tr13.xlsx,CONTROL", "..."],
   "created": "2026-09-19T13:51:39-04:00",
   "user": "hydro", "host": "OU13700", "cwd": "D:\\...\\0023-makePst",
   "python": "3.12.12", "pandas": "3.0.5", "platform": "Windows-11-10.0.26200-SP0",
+  "checked_against": {"pestchek": "17.2", "pestpp": "5.2.29"},
   "sources": [
     {"path": "D:\\...\\tr13.xlsx", "sha256": "9d641a2f...", "size": 3089317,
      "modified": "2026-07-12T03:32:10-04:00", "role": "control",
@@ -736,7 +737,7 @@ stored anywhere. To release: bump the version in `pyproject.toml` and the fallba
 `makepst/__init__.py` (a test keeps them equal), add a `CHANGELOG.md` entry, commit, then
 
 ```
-git tag v0.4.0 && git push origin main v0.4.0
+git tag v0.5.0 && git push origin main v0.5.0
 ```
 
 The `publish` workflow checks that the tag matches the package version, runs the tests, builds
