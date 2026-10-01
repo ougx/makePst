@@ -205,8 +205,11 @@ group, truncated to 12 characters.
 ### dump — .pst → workbook
 
 ```
-makepst dump run.pst run.xlsx [--split]
+makepst dump run.pst [run.xlsx] [--split]
 ```
+
+The workbook name is optional: `makepst dump case.pst` writes `case.xlsx` beside the
+control file. Supply a workbook path to choose a different name or location.
 
 Writes `CONTROL`, `PARGP`, `PAR` (with `TIETO`), `OBS`, `PRIOR`, `IO`, `PP`, `NOTES` (the
 header comments) and `BUILD` — the command that rebuilds the control file from this

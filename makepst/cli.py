@@ -171,6 +171,8 @@ def _resolve_paths(argv, book):
 
 
 def dump(args):
+    if args.workbook is None:
+        args.workbook = os.path.splitext(args.pstfile)[0] + '.xlsx'
     pst = read_pst(args.pstfile)
     cmd = to_workbook(pst, args.workbook, split=args.split)
     print('rebuild with:\n  ' + cmd)
@@ -788,7 +790,7 @@ def main(argv=None):
 
     d = sub.add_parser('dump', help='PEST control file -> new workbook')
     d.add_argument('pstfile')
-    d.add_argument('workbook', help='.xlsx to create')
+    d.add_argument('workbook', nargs='?', help='.xlsx to create (default: PST path with .xlsx extension)')
     d.add_argument('--split', action='store_true', help='one PAR_<group> / OBS_<group> sheet per group')
     d.add_argument('--no_manifest', action='store_true', help="don't write <workbook>.manifest.json")
 

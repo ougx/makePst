@@ -85,6 +85,28 @@ def test_dump_manifest(tmp_path):
     assert m['output']['sha256'] == sha256(book) and m['build_command'].startswith('makepst build')
 
 
+@pytest.mark.parametrize('options', [[], ['--split', '--no_manifest']])
+def test_dump_default_workbook(tmp_path, monkeypatch, options):
+    source_dir = tmp_path / 'inputs'
+    source_dir.mkdir()
+    source = source_dir / 'case.pst'
+    shutil.copy(PST, source)
+    monkeypatch.chdir(tmp_path)
+
+    main(['dump', os.path.join('inputs', 'case.pst')] + options)
+
+    book = source.with_suffix('.xlsx')
+    assert book.exists()
+    assert not (tmp_path / 'case.xlsx').exists()
+    if '--no_manifest' in options:
+        assert not os.path.exists(str(book) + '.manifest.json')
+    else:
+        m = manifest(book)
+        assert m['sources'][0]['sha256'] == sha256(source)
+        assert m['output']['sha256'] == sha256(book)
+        assert 'case.xlsx' in m['build_command']
+
+
 def test_update_manifest(tmp_path):
     book = tmp_path / 'u.xlsx'
     shutil.copy(BOOK, book)
