@@ -32,7 +32,9 @@ def _spec_parts(spec):
 
 
 def _build_parser(p):
-    p.add_argument('pstfile', help='control file to write, or a workbook whose BUILD sheet holds the command')
+    p.add_argument('pstfile', nargs='?',
+                   help='control file to write (default: source table path with .pst extension), '
+                        'or a workbook whose BUILD sheet holds the command')
     p.add_argument('mode', nargs='?', default=None,
                    help='estimation | regularisation | prediction | pareto (default: CONTROL sheet, else estimation)')
     p.add_argument('--set_ctl_xls', metavar='BOOK,SHEET', help='CONTROL sheet: NAME / VALUE columns')
@@ -48,7 +50,7 @@ def _build_parser(p):
     p.add_argument('--ss', action='store_true', help='steady state: drop ss*/sy* parameters and groups')
     p.add_argument('--no_dump_tpl', action='store_true', help="don't write dump.tpl next to the pst")
     p.add_argument('--no_manifest', action='store_true', help="don't write <pst>.manifest.json")
-    p.add_argument('--out', metavar='PST', help='with a workbook: where to write (default: the name in the BUILD sheet)')
+    p.add_argument('--out', metavar='PST', help='output control file path (with a workbook: default is the name in the BUILD sheet)')
     p.add_argument('--dry_run', action='store_true',
                    help="report as `makepst validate` would on the control file this builds; write nothing")
     fmt_ = p.add_mutually_exclusive_group()
@@ -112,21 +114,48 @@ def _finish_pst(pst, path, manifest, dump_tpl, version=None, eol=None):
         print(f'manifest written to {manifest.write()}')
 
 
+def _resolve_build_output(args, book=None):
+    # With an omitted output, argparse puts a lone mode in the first positional slot.
+    if args.mode is None and args.pstfile and args.pstfile.isalpha():
+        try:
+            mode = Pst(args.pstfile).pestmode
+        except ValueError:
+            pass
+        else:
+            args.mode, args.pstfile = mode, None
+    if args.pstfile is None:
+        sources = [args.set_ctl_xls, args.set_ctl_csv]
+        for t in TABLES:
+            sources.extend(getattr(args, f'add_{t}_xls'))
+            sources.extend(getattr(args, f'add_{t}_csv'))
+        source = next((s for s in sources if s), book)
+        if args.out:
+            args.pstfile = args.out
+        elif source:
+            path = _spec_parts(source)[0]
+            if book:
+                path = os.path.abspath(path)
+            args.pstfile = os.path.splitext(path)[0] + '.pst'
+        else:
+            raise SystemExit('cannot infer output filename; supply a PST filename, --out, or a source table')
+
+
 def build(args):
+    _resolve_build_output(args)
     manifest = None if args.no_manifest or args.dry_run else Manifest('build', args._argv)
     if args.pstfile.lower().endswith(WORKBOOK_EXT):
         # `makepst build book.xlsx [--out x.pst]`: run the command in the workbook's BUILD sheet
         pst, ns = build_from_workbook(args.pstfile, manifest)
         if args.dry_run:
             return check_report(pst, args.pstfile, built=True, dry_run=True)
-        out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.pstfile)), ns.pstfile)
+        out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.pstfile)), ns.out or ns.pstfile)
         _finish_pst(pst, out, manifest, dump_tpl=not (args.no_dump_tpl or ns.no_dump_tpl),
                     version=_version(args) or _version(ns))
         return
     pst = build_pst(args, manifest)
     if args.dry_run:
-        return check_report(pst, args.pstfile, built=True, dry_run=True)
-    _finish_pst(pst, args.pstfile, manifest, dump_tpl=not args.no_dump_tpl, version=_version(args))
+        return check_report(pst, args.out or args.pstfile, built=True, dry_run=True)
+    _finish_pst(pst, args.out or args.pstfile, manifest, dump_tpl=not args.no_dump_tpl, version=_version(args))
 
 
 def build_from_workbook(book, manifest=None):
@@ -147,6 +176,7 @@ def build_from_workbook(book, manifest=None):
     parser = argparse.ArgumentParser(prog='BUILD sheet')
     _build_parser(parser)
     ns = parser.parse_args(argv)
+    _resolve_build_output(ns, book)
     if manifest is not None:
         manifest.add_source(book, 'BUILD', 'build command')
         manifest.add(build_args=argv)      # resolved paths, as executed

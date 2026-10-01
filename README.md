@@ -147,7 +147,7 @@ and writes nothing.
 ### build — tables → .pst
 
 ```
-makepst build out.pst [estimation|regularisation|prediction|pareto]
+makepst build [out.pst] [estimation|regularisation|prediction|pareto]
     --set_ctl_xls book.xlsx,CONTROL          (or --set_ctl_csv file.csv)
     --add_pargp_xls book.xlsx,PARGP
     --add_par_xls   book.xlsx,PAR_*          (repeatable; sheet names may be globs)
@@ -156,6 +156,12 @@ makepst build out.pst [estimation|regularisation|prediction|pareto]
     [--add_tied_xls ...] [--add_prior_xls ...] [--add_comment "text"] [--add_comment_xls ...]
     [--fill_parval run.par [--real NAME]] [--ss] [--no_dump_tpl] [--v2]
 ```
+
+The output filename is optional. For example, `makepst build --set_ctl_xls case.xlsx,CONTROL
+--add_par_xls case.xlsx,PAR --add_obs_xls case.xlsx,OBS` writes `case.pst` beside the workbook.
+The default uses the CONTROL table's filename, or the first supplied table if there is no
+CONTROL table, replacing its extension with `.pst`. A filename or `--out` chooses the output
+explicitly. The output can also be omitted from a workbook's `BUILD` command.
 
 Each `--add_*` takes `book,SHEET` (`_xls`) or a csv path (`_csv`) and may be repeated;
 tables split across sheets are concatenated. The sheet name may be a glob:

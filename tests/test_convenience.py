@@ -111,3 +111,72 @@ def test_workbook_without_build_sheet_points_at_dry_run(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main(['build', str(book)])
     assert 'has no BUILD sheet' in str(exc.value) and '--dry_run' in str(exc.value)
+
+
+@pytest.mark.parametrize('mode', [[], ['regul']])
+def test_build_default_output_from_tables(tmp_path, monkeypatch, mode):
+    from make_fixture import BOOK, BUILD_ARGS, PST
+    from makepst import read_pst
+
+    book = _fixture_book(tmp_path)
+    monkeypatch.chdir(tmp_path.parent)
+    options = [a.replace(BOOK, str(book)) for a in BUILD_ARGS[2:]]
+    main(['build'] + mode + options)
+
+    out = book.with_suffix('.pst')
+    assert out.exists()
+    if mode:
+        with open(PST) as f:
+            assert out.read_text() == f.read()
+    else:
+        assert read_pst(out).pestmode == 'estimation'
+    assert all(status == 'unchanged' for status, _ in check_manifest(str(out) + '.manifest.json'))
+
+
+def test_build_default_output_from_first_csv(tmp_path):
+    from make_fixture import BOOK, BUILD_ARGS
+    from makepst import read_pst
+
+    options = []
+    for arg in BUILD_ARGS[4:]:                 # omit the output and CONTROL table
+        if arg.startswith(BOOK + ','):
+            sheet = arg.split(',')[1]
+            table = tmp_path / f'{sheet}.csv'
+            data = load_table(arg)
+            if 'PARCHGLIM' in data:
+                data['PARCHGLIM'] = 'factor'      # absolute limits require the omitted CONTROL table
+            data.to_csv(table, index=False)
+            options[-1] = options[-1].replace('_xls', '_csv')
+            arg = str(table)
+        options.append(arg)
+    main(['build', 'regul'] + options)
+    assert read_pst(tmp_path / 'PARGP.pst').npar == 11
+
+
+def test_build_output_override_without_positional(tmp_path):
+    from make_fixture import BUILD_ARGS
+
+    out = tmp_path / 'chosen.pst'
+    main(['build', '--out', str(out)] + BUILD_ARGS[1:])
+    assert out.exists()
+
+
+def test_build_sheet_without_output(tmp_path, monkeypatch):
+    from make_fixture import PST
+
+    book = _fixture_book(tmp_path)
+    wb = openpyxl.load_workbook(book)
+    ws = wb['BUILD']
+    ws['A2'] = ws['A2'].value.replace('demo.pst ', '')
+    wb.save(book)
+    wb.close()
+    monkeypatch.chdir(tmp_path.parent)
+
+    main(['build', os.path.relpath(book)])
+    with open(PST) as f:
+        assert book.with_suffix('.pst').read_text() == f.read()
+
+
+def test_build_without_output_or_tables():
+    with pytest.raises(SystemExit, match='cannot infer output filename'):
+        main(['build'])
