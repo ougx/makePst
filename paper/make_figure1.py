@@ -2,11 +2,14 @@
 
     python paper/make_figure1.py            # writes figure1.svg and figure1.png next to this script
     python paper/make_figure1.py out.svg    # or elsewhere (the png beside it)
+    python paper/make_figure1.py --submission   # also Figure_1.pdf (vector, 7 in wide) and Figure_1.tif (600 dpi)
 
 Plain SVG, no dependencies. White background (never rely on transparency), no caption inside
 the graphic (the manifest's caption lives in the manuscript), grayscale-safe. The PNG (220 dpi,
 what make_docx.py embeds) is rasterized with Inkscape when installed, else headless Chrome;
-without either the SVG alone is written. For PDF: inkscape figure1.svg --export-type=pdf.
+without either the SVG alone is written. --submission adds the journal's files: Figure_1.pdf (vector,
+7 in wide, fonts embedded) and Figure_1.tif (600 dpi). Check the PDF with Acrobat, Ghostscript or
+pdftocairo: poppler's pdftoppm (splash) draws some of Chrome's strokes hollow, which the file is not.
 """
 import os
 import shutil
@@ -109,7 +112,7 @@ def figure():
     s += text(60, 563, 'Example provenance manifest (excerpt)', 'h', 'start')
     s += text(60, 586, 'Written beside each produced file; full JSON also records timestamps, platform, and input roles.',
               anchor='start')
-    s += text(60, 616, 'makepst: 0.4.0', 'm', 'start')
+    s += text(60, 616, 'makepst: 0.5.0', 'm', 'start')
     s += text(60, 638, 'command: build', 'm', 'start')
     s += text(60, 660, 'argv: makepst build tr13.pst regul ...', 'm', 'start')
     s += text(505, 616, 'source: tr13.xlsx   sha256: b43fc509eafe...', 'm', 'start')
@@ -141,11 +144,71 @@ def rasterize(svg, png):
     return None
 
 
+PRINT_WIDTH_IN = 7.0                # full page width in the journal; text sizes are honest at this width
+TIFF_DPI = 600                      # Wiley's line-art resolution
+
+
+def _chrome():
+    return next((c for c in CHROME if os.path.exists(c) or shutil.which(c)), None)
+
+
+def to_pdf(svg, pdf):
+    """svg -> vector PDF, one page exactly PRINT_WIDTH_IN wide (Figure_1.pdf for submission)."""
+    if shutil.which('inkscape'):
+        subprocess.run(['inkscape', svg, '--export-type=pdf', f'--export-filename={pdf}'], check=True,
+                       capture_output=True)
+        return 'inkscape'
+    chrome = _chrome()
+    if not chrome:
+        return None
+    w, h = PRINT_WIDTH_IN, PRINT_WIDTH_IN * H / W
+    with open(svg, encoding='utf-8') as f:
+        body = f.read().replace(f'width="{W}" height="{H}"', 'width="100%" height="100%"', 1)
+    page = os.path.splitext(os.path.abspath(pdf))[0] + '.print.html'
+    with open(page, 'w', encoding='utf-8') as f:
+        f.write(f'<!doctype html><style>@page{{size:{w}in {h:.4f}in;margin:0}}html,body{{margin:0}}'
+                f'svg{{display:block;width:{w}in;height:{h:.4f}in}}</style>{body}')
+    try:
+        subprocess.run([chrome, '--headless=new', '--disable-gpu', '--no-pdf-header-footer',
+                        f'--print-to-pdf={os.path.abspath(pdf)}', 'file:///' + page.replace(os.sep, '/')],
+                       check=True, capture_output=True)
+    finally:
+        os.remove(page)
+    return 'chrome'
+
+
+def to_tiff(svg, tiff):
+    """svg -> TIFF at TIFF_DPI over PRINT_WIDTH_IN, LZW-compressed (a raster fallback for submission)."""
+    from PIL import Image
+    chrome = _chrome()
+    if not chrome:
+        return None
+    png = os.path.splitext(os.path.abspath(tiff))[0] + '.tmp.png'
+    scale = PRINT_WIDTH_IN * TIFF_DPI / W
+    subprocess.run([chrome, '--headless=new', '--disable-gpu', '--hide-scrollbars',
+                    f'--force-device-scale-factor={scale:.4f}', f'--window-size={W},{H}',
+                    f'--screenshot={png}', 'file:///' + os.path.abspath(svg).replace(os.sep, '/')],
+                   check=True, capture_output=True)
+    try:
+        with Image.open(png) as im:
+            im.convert('RGB').save(tiff, compression='tiff_lzw', dpi=(TIFF_DPI, TIFF_DPI))
+    finally:
+        os.remove(png)
+    return 'chrome'
+
+
 if __name__ == '__main__':
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), 'figure1.svg')
+    paths = [a for a in sys.argv[1:] if not a.startswith('--')]
+    out = paths[0] if paths else os.path.join(os.path.dirname(os.path.abspath(__file__)), 'figure1.svg')
     with open(out, 'w', encoding='utf-8', newline='\n') as f:
         f.write(figure())
     print('written', out)
     png = os.path.splitext(out)[0] + '.png'
     tool = rasterize(out, png)
     print(f'written {png} ({tool})' if tool else f'{png} not written: no Inkscape or Chrome found')
+    if '--submission' in sys.argv:                  # the files the journal takes: vector PDF, 600-dpi TIFF
+        folder = os.path.dirname(os.path.abspath(out))
+        for name, make in (('Figure_1.pdf', to_pdf), ('Figure_1.tif', to_tiff)):
+            path = os.path.join(folder, name)
+            tool = make(out, path)
+            print(f'written {path} ({tool})' if tool else f'{path} not written: no Inkscape or Chrome found')
