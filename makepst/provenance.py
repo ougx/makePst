@@ -40,7 +40,7 @@ def checked_against():
 
 
 class Manifest:
-    def __init__(self, command, argv=None):
+    def __init__(self, command, argv=None, note=None):
         from . import __version__
         import pandas
         import openpyxl
@@ -60,6 +60,8 @@ class Manifest:
             'sources': [],
             'output': None,
         }
+        if note:
+            self.data['note'] = note        # why the run was made: --note, or `record -m`
         try:
             import xlwings
         except ImportError:
@@ -99,6 +101,24 @@ class Manifest:
         return path
 
 
+def keep_previous(sidecar):
+    """Move an output's manifest aside so a new one can take its place and the ledger keeps both:
+    model.pst.manifest.json -> model.pst.<its created time>.manifest.json. Returns the new path."""
+    try:
+        with open(sidecar, encoding='utf-8') as f:
+            created = str(json.load(f).get('created', ''))
+    except (OSError, ValueError, AttributeError):
+        created = ''
+    stamp = ''.join(c for c in created[:19] if c.isdigit() or c == 'T') or \
+        _dt.datetime.fromtimestamp(os.stat(sidecar).st_mtime).strftime('%Y%m%dT%H%M%S')
+    base = sidecar[:-len('.manifest.json')]
+    dest, n = f'{base}.{stamp}.manifest.json', 1
+    while os.path.exists(dest):
+        dest, n = f'{base}.{stamp}-{n}.manifest.json', n + 1
+    os.replace(sidecar, dest)
+    return dest
+
+
 def _safe(fn):
     try:
         return fn()
@@ -134,9 +154,12 @@ def find_manifests(folders, recursive=True):
 
 
 def mentions(data, name):
-    """Does a manifest's output or any source match `name` (a file name, path, or sha256 prefix)?"""
+    """Does a manifest's output, any source, or the version an in-place `record` replaced match `name`
+    (a file name, path, or sha256 prefix)?"""
     name = name.lower()
     records = list(data.get('sources', [])) + ([data['output']] if data.get('output') else [])
+    if isinstance(data.get('previous'), dict) and data['previous'].get('sha256'):
+        records.append({'sha256': data['previous']['sha256']})
     for rec in records:
         path = str(rec.get('path', '')).lower()
         if path.endswith(name) or os.path.basename(path) == os.path.basename(name) or \
@@ -159,6 +182,9 @@ def log_line(data, base='.', check=False):
     if counts:
         line += f'  [{counts}]'
     line += f'  makepst {data.get("makepst", "?")}'
+    note = ' / '.join(str(data.get('note') or '').split('\n')).strip()
+    if note:
+        line += f'  "{note if len(note) <= 60 else note[:57] + "..."}"'
     if check:
         states = {s for s, _ in check_manifest(data['_manifest'])}
         line += '  ' + ('unchanged' if states == {'unchanged'} else

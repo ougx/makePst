@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `record`: a manifest for a change makePst did not make - a control file edited by hand, in place
+  or saved as a new file. It records the message (`-m`, required), the file's hash and counts, the
+  file it was made from (`--from`) with a `diff` summary of the changes, and other files the edit
+  relied on (`--source`). An edit in place keeps the earlier manifest as
+  `<file>.<time>.manifest.json`, so `log` shows both steps, and records the replaced version's hash
+  under `previous`, so `log --file <that hash>` follows the lineage through the edit; `--comment`
+  also writes the message into the control file as dated `# ...` header lines.
+- `--note TEXT` on every command that writes a manifest (`build`, `dump`, `update`, `parrep`, `set`,
+  `rescale`, `reweight`, `hpstart`, `bundle`): why the run was made, kept in the manifest under
+  `note`. `log` prints a manifest's note at the end of its line.
+
 ## 0.5.0 (2026-09-29)
 
 - `tools/rule_sources.py`: are `validate`'s rules still current? `pestpp` re-reads PEST++'s option

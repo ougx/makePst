@@ -2,7 +2,7 @@
 parrep (.par values -> pst), set / rescale (parameter edits -> pst), init (starter workbook),
 validate (pestchek-style checks), diff (compare two),
 reweight (observation weights -> pst), tempchek (templates -> model input files), inschek (model output files -> observation values),
-provenance / log / bundle (manifests: verify, list as a ledger, zip a run)."""
+provenance / log / bundle / record (manifests: verify, list as a ledger, zip a run, record a hand edit)."""
 import argparse
 import os
 import shlex
@@ -50,12 +50,19 @@ def _build_parser(p):
     p.add_argument('--ss', action='store_true', help='steady state: drop ss*/sy* parameters and groups')
     p.add_argument('--no_dump_tpl', action='store_true', help="don't write dump.tpl next to the pst")
     p.add_argument('--no_manifest', action='store_true', help="don't write <pst>.manifest.json")
+    p.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
     p.add_argument('--out', metavar='PST', help='output control file path (with a workbook: default is the name in the BUILD sheet)')
     p.add_argument('--dry_run', action='store_true',
                    help="report as `makepst validate` would on the control file this builds; write nothing")
     fmt_ = p.add_mutually_exclusive_group()
     fmt_.add_argument('--v2', action='store_true', help='write a PEST++ version-2 file (external csv tables beside it)')
     fmt_.add_argument('--v1', action='store_true', help='write the classic format (default for tables)')
+
+
+def _note(args):
+    """--note lines as one text (None when there are none)."""
+    return '\n'.join(n.strip() for n in getattr(args, 'note', []) if n.strip()) or None
 
 
 def build_pst(args, manifest=None):
@@ -142,7 +149,7 @@ def _resolve_build_output(args, book=None):
 
 def build(args):
     _resolve_build_output(args)
-    manifest = None if args.no_manifest or args.dry_run else Manifest('build', args._argv)
+    manifest = None if args.no_manifest or args.dry_run else Manifest('build', args._argv, note=_note(args))
     if args.pstfile.lower().endswith(WORKBOOK_EXT):
         # `makepst build book.xlsx [--out x.pst]`: run the command in the workbook's BUILD sheet
         pst, ns = build_from_workbook(args.pstfile, manifest)
@@ -180,6 +187,8 @@ def build_from_workbook(book, manifest=None):
     if manifest is not None:
         manifest.add_source(book, 'BUILD', 'build command')
         manifest.add(build_args=argv)      # resolved paths, as executed
+        if _note(ns):                      # a --note in the BUILD sheet follows the command line's
+            manifest.add(note='\n'.join(n for n in (manifest.data.get('note'), _note(ns)) if n))
     return build_pst(ns, manifest), ns
 
 
@@ -207,7 +216,7 @@ def dump(args):
     cmd = to_workbook(pst, args.workbook, split=args.split)
     print('rebuild with:\n  ' + cmd)
     if not args.no_manifest:
-        m = Manifest('dump', args._argv)
+        m = Manifest('dump', args._argv, note=_note(args))
         m.add_source(args.pstfile, role='control file')
         m.set_output(args.workbook, **pst.counts)
         m.add(build_command=cmd)
@@ -228,7 +237,7 @@ def parrep(args):
 
     The base is a control file, or a workbook with a BUILD sheet (built first, then filled).
     """
-    manifest = None if args.no_manifest else Manifest('parrep', args._argv)
+    manifest = None if args.no_manifest else Manifest('parrep', args._argv, note=_note(args))
     if args.pstfile.lower().endswith(WORKBOOK_EXT):
         pst, _ = build_from_workbook(args.pstfile, manifest)
     else:
@@ -249,7 +258,7 @@ def parrep(args):
 
 def set_par(args):
     """Set parameter fields by name or glob, keeping tied children and preferred values consistent."""
-    manifest = None if args.no_manifest else Manifest('set', args._argv)
+    manifest = None if args.no_manifest else Manifest('set', args._argv, note=_note(args))
     pst = read_pst(args.pstfile)
     if manifest is not None:
         manifest.add_source(args.pstfile, role='base control file')
@@ -284,7 +293,7 @@ def set_par(args):
 
 def rescale(args):
     """Move parameter values into SCALE (every selected parameter starts at 1), or back with --undo."""
-    manifest = None if args.no_manifest else Manifest('rescale', args._argv)
+    manifest = None if args.no_manifest else Manifest('rescale', args._argv, note=_note(args))
     pst = read_pst(args.pstfile)
     if manifest is not None:
         manifest.add_source(args.pstfile, role='base control file')
@@ -347,7 +356,7 @@ def reweight(args):
     if args.real and not args.obs_csv:
         raise SystemExit('--real requires --obs_csv')
 
-    manifest = None if args.no_manifest or args.dry_run else Manifest('reweight', args._argv)
+    manifest = None if args.no_manifest or args.dry_run else Manifest('reweight', args._argv, note=_note(args))
     pst = read_pst(args.pstfile)
     if manifest is not None:
         manifest.add_source(args.pstfile, role='base control file')
@@ -668,16 +677,19 @@ def inschek(args):
     _report(nerr, nwarn, ins)
 
 
+def _load_compared(path):
+    # a workbook stands for the control file `build` would write from it, which is normalized;
+    # a control file is compared as it is
+    pst = _load_target(path)
+    if path.lower().endswith(WORKBOOK_EXT):
+        pst.normalize()
+    return pst
+
+
 def diff(args):
     """Semantic comparison of two control files / workbooks; exit 1 when they differ."""
     from .diff import compare
-    old, new = _load_target(args.old), _load_target(args.new)
-    # a workbook stands for the control file `build` would write from it, which is normalized;
-    # a control file is compared as it is
-    for path, pst in ((args.old, old), (args.new, new)):
-        if path.lower().endswith(WORKBOOK_EXT):
-            pst.normalize()
-    d = compare(old, new, rtol=args.rtol)
+    d = compare(_load_compared(args.old), _load_compared(args.new), rtol=args.rtol)
     print(d.to_text(max_rows=0 if args.summary else args.max_rows))
     summary = f'{args.old} -> {args.new}: {d.summary()}'
     print(summary)
@@ -708,7 +720,7 @@ def update(args):
     def flat(items):   # repeated flags, each possibly a comma list
         return [x.strip() for s in items for x in s.split(',') if x.strip()] or None
 
-    manifest = None if args.no_manifest or args.dry_run else Manifest('update', args._argv)
+    manifest = None if args.no_manifest or args.dry_run else Manifest('update', args._argv, note=_note(args))
     if manifest is not None:
         manifest.add_source(args.workbook, role='workbook')
         for path, role in ((args.par, 'parameter values'), (args.pst, 'control file'),
@@ -726,6 +738,83 @@ def update(args):
         manifest.add(realization=args.real, par_cols=args.par_cols, obs_cols=args.obs_cols,
                      sheet=flat(args.sheet), group=flat(args.group), overwrite_formulas=args.overwrite_formulas)
         print(f'manifest written to {manifest.write()}')
+
+
+def _insert_comments(path, lines):
+    """Add '# ...' lines to a control file's header, after 'pcf' and the comments already there; every
+    other byte stays as it was. Non-ASCII characters become '?': PEST reads the file as plain text."""
+    with open(path, 'rb') as f:
+        rows = f.read().splitlines(keepends=True)
+    start = next((i for i, r in enumerate(rows) if r.strip()), None)
+    if start is None or not rows[start].strip().lower().startswith(b'pcf'):
+        raise SystemExit(f'{path} does not start with "pcf"; --comment needs a control file')
+    eol = b'\r\n' if rows[start].endswith(b'\r\n') else b'\n'
+    at = start + 1
+    while at < len(rows) and rows[at].lstrip().startswith(b'#'):
+        at += 1
+    if at and not rows[at - 1].endswith(b'\n'):          # 'pcf' or a comment as the last line, no newline
+        rows[at - 1] += eol
+    rows[at:at] = [f'# {line}'.rstrip().encode('ascii', 'replace') + eol for line in lines]
+    with open(path, 'wb') as f:
+        f.write(b''.join(rows))
+
+
+def record(args):
+    """Record a change makePst did not make - a control file edited by hand, in place or saved under a new
+    name - in a manifest beside it, so `log` and `provenance` show it with the other steps."""
+    import datetime as dt
+    from .provenance import keep_previous
+    new, old = args.target, args.source_from
+    if not os.path.isfile(new):
+        raise SystemExit(f'{new} not found')
+    if old and os.path.abspath(old) == os.path.abspath(new):
+        raise SystemExit('--from names the file itself; for an edit in place, leave --from out')
+    if old and not os.path.isfile(old):
+        raise SystemExit(f'{old} not found')
+    note = '\n'.join(m.strip() for m in args.message if m.strip())
+    if not note:
+        raise SystemExit('-m: say what was changed and why')
+    if args.comment:
+        today = dt.date.today().isoformat()
+        _insert_comments(new, [f'{today} {line}' for line in note.splitlines()])
+        print(f'comment added to {new}')
+
+    m = Manifest('record', args._argv, note=note)
+    if old:
+        m.add_source(old, role='edited from')
+    for path in args.source:
+        m.add_source(path, role='reference')
+    counts = {}
+    if _is_case(new):
+        try:
+            pst = _load_compared(new)
+            if new.lower().endswith('.pst'):
+                counts = pst.counts
+            if old and _is_case(old):
+                from .diff import compare
+                d = compare(_load_compared(old), pst)
+                print(d.to_text(max_rows=0))
+                print(f'{old} -> {new}: {d.summary()}')
+                m.add(changes=d.summary())
+        except (OSError, ValueError, KeyError) as e:
+            print(f'WARNING {new} or {old} could not be read for comparison ({e}); recorded by hash only')
+    m.set_output(new, **counts)
+    sidecar = os.path.abspath(new) + '.manifest.json'
+    if os.path.exists(sidecar):
+        # the version before the edit is gone from disk; its hash (from the earlier manifest) keeps the
+        # lineage, so `log --file <that hash>` still finds this step
+        import json
+        try:
+            with open(sidecar, encoding='utf-8') as f:
+                earlier = json.load(f)
+        except (OSError, ValueError):
+            earlier = {}
+        kept = keep_previous(sidecar)
+        before = earlier.get('output') or {}
+        m.add(previous={'manifest': kept, 'command': earlier.get('command'),
+                        'sha256': before.get('sha256'), 'created': earlier.get('created')})
+        print(f'earlier manifest kept as {kept}')
+    print(f'manifest written to {m.write()}')
 
 
 def provenance(args):
@@ -760,7 +849,7 @@ def bundle(args):
     from .provenance import bundle_run
     pst = read_pst(args.pstfile)
     base = args.base_dir or guess_base_dir(pst, args.pstfile)
-    manifest = None if (args.no_manifest or args.list) else Manifest('bundle', args._argv)
+    manifest = None if (args.no_manifest or args.list) else Manifest('bundle', args._argv, note=_note(args))
     out = None if args.list else (args.out or os.path.splitext(args.pstfile)[0] + '.zip')
     included, missing = bundle_run(pst, args.pstfile, out, base_dir=base, sources=args.sources,
                                    outputs=args.outputs, extra=args.extra, manifest=manifest)
@@ -788,7 +877,7 @@ def bundle(args):
 def hpstart(args):
     from .hpstart import write_hpstart
     pst = read_pst(args.pstfile)
-    manifest = None if args.no_manifest else Manifest('hpstart', args._argv)
+    manifest = None if args.no_manifest else Manifest('hpstart', args._argv, note=_note(args))
     if manifest is not None:
         for path, role in ((args.pstfile, 'control file'), (args.template, 'hp template'),
                            (args.res, 'residuals'), (args.obs_csv, 'observation ensemble'),
@@ -808,7 +897,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # legacy form: makePst.py out.pst mode --add_par_xls ...  (no subcommand)
     if argv and argv[0] not in ('build', 'dump', 'update', 'parrep', 'init', 'set', 'rescale', 'reweight', 'validate', 'provenance', 'log',
-                                'bundle', 'diff', 'tempchek', 'inschek', 'hpstart',
+                                'bundle', 'record', 'diff', 'tempchek', 'inschek', 'hpstart',
                                 '-h', '--help', '-v', '--version'):
         argv.insert(0, 'build')
 
@@ -823,6 +912,8 @@ def main(argv=None):
     d.add_argument('workbook', nargs='?', help='.xlsx to create (default: PST path with .xlsx extension)')
     d.add_argument('--split', action='store_true', help='one PAR_<group> / OBS_<group> sheet per group')
     d.add_argument('--no_manifest', action='store_true', help="don't write <workbook>.manifest.json")
+    d.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
 
     i = sub.add_parser('init', help='starter workbook with headers, defaults, drop-downs and a BUILD sheet')
     i.add_argument('workbook', help='.xlsx to create')
@@ -837,6 +928,8 @@ def main(argv=None):
     r.add_argument('--set', action='append', default=[], metavar='NAME=VALUE',
                    help='also change a control value, e.g. --set noptmax=0 (repeatable)')
     r.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    r.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
     r.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
                    help="line endings to write (default: the input file's own)")
     rf = r.add_mutually_exclusive_group()
@@ -856,6 +949,8 @@ def main(argv=None):
     s.add_argument('--no_sync_prior', action='store_true',
                    help="don't move single-parameter preferred values to the new value (they would pull it back)")
     s.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    s.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
     s.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
                    help="line endings to write (default: the input file's own)")
     sf = s.add_mutually_exclusive_group()
@@ -876,6 +971,8 @@ def main(argv=None):
     rs.add_argument('--set', action='append', default=[], metavar='NAME=VALUE',
                     help='also change a control value, e.g. --set noptmax=0 (repeatable)')
     rs.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    rs.add_argument('--note', action='append', default=[], metavar='TEXT',
+                    help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
     rs.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
                     help="line endings to write (default: the input file's own)")
     rsf = rs.add_mutually_exclusive_group()
@@ -902,6 +999,8 @@ def main(argv=None):
     rw.add_argument('--report', metavar='CSV', help='write the group before/after report to CSV')
     rw.add_argument('--dry_run', action='store_true', help='preview the adjustment without writing files')
     rw.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    rw.add_argument('--note', action='append', default=[], metavar='TEXT',
+                    help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
     rw.add_argument('--eol', choices=('keep', 'crlf', 'lf'), default='keep',
                     help="line endings to write (default: the input file's own)")
     rwf = rw.add_mutually_exclusive_group()
@@ -918,6 +1017,8 @@ def main(argv=None):
     h.add_argument('--real', help='IES realization name, or best (default base)')
     h.add_argument('--par', help='optional .par or IES parameter file to replace template parameter values')
     h.add_argument('--no_manifest', action='store_true', help="don't write <out>.manifest.json")
+    h.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
 
     v = sub.add_parser('validate', help='pestchek-style checks on a control file or a workbook')
     v.add_argument('target', help='control file, or a workbook with a BUILD sheet')
@@ -940,6 +1041,18 @@ def main(argv=None):
     g.add_argument('--check', action='store_true', help='also compare every recorded hash with the file on disk')
     g.add_argument('--no_recursive', action='store_true', help='do not descend into subfolders')
 
+    rc = sub.add_parser('record', help='record a change made by hand (a control file edited, or saved as a new '
+                                       'file) in a manifest, so log and provenance show it')
+    rc.add_argument('target', help='the file as it is now: the edited control file (or workbook, or any file)')
+    rc.add_argument('-m', '--message', action='append', required=True, metavar='TEXT',
+                    help='what was changed and why (repeatable: one line each)')
+    rc.add_argument('--from', dest='source_from', metavar='FILE',
+                    help='the file it was made from; two control files / workbooks are compared and the changes recorded')
+    rc.add_argument('--source', action='append', default=[], metavar='FILE',
+                    help='another file the change was based on, e.g. a .res file or a memo (repeatable)')
+    rc.add_argument('--comment', action='store_true',
+                    help='also add the message as dated "# ..." lines at the top of the control file')
+
     b = sub.add_parser('bundle', help='zip a run for reproduction or review: control file, manifest, templates, '
                                       'instruction files, model inputs, command files')
     b.add_argument('pstfile', help='control file')
@@ -952,6 +1065,8 @@ def main(argv=None):
     b.add_argument('--list', action='store_true', help='show what would be bundled, write nothing')
     b.add_argument('--strict', action='store_true', help='exit 1 when a referenced file is missing')
     b.add_argument('--no_manifest', action='store_true', help="don't write <zip>.manifest.json")
+    b.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
 
     t = sub.add_parser('tempchek', help='check a template file, or write model input files from parameter values (like TEMPCHEK)')
     t.add_argument('target', help='template file, or a control file / workbook (all of its templates)')
@@ -1002,13 +1117,15 @@ def main(argv=None):
     u.add_argument('--dry_run', action='store_true', help='preview matches and skipped cells without writing files')
     u.add_argument('--backend', choices=['xlwings', 'openpyxl'], help='default: xlwings if installed')
     u.add_argument('--no_manifest', action='store_true', help="don't write <workbook>.manifest.json")
+    u.add_argument('--note', action='append', default=[], metavar='TEXT',
+                   help='why this run: kept in the manifest, shown by log (repeatable: one line each)')
     u.add_argument('--no_phi', action='store_true', help="don't write the PHI / PHI_IES sheets with --res / --obs_csv")
 
     args = ap.parse_args(argv)
     args._argv = argv                 # the command line as given, for the manifest
     {'build': build, 'dump': dump, 'update': update, 'parrep': parrep, 'init': init, 'set': set_par, 'rescale': rescale,
      'reweight': reweight,
-     'validate': validate, 'provenance': provenance, 'log': log, 'bundle': bundle, 'diff': diff,
+     'validate': validate, 'provenance': provenance, 'log': log, 'bundle': bundle, 'record': record, 'diff': diff,
      'tempchek': tempchek, 'inschek': inschek,
      'hpstart': hpstart}[args.cmd](args)
 

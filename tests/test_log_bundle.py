@@ -96,3 +96,76 @@ def test_bundle_reports_missing_files(project, capsys):
     assert 'model.in' not in zipfile.ZipFile(project / 'run.zip').namelist()
     with pytest.raises(SystemExit):
         main(['bundle', 'model.pst', 'run2.zip', '--strict'])
+
+
+# ---------------------------------------------------------------------- record
+def _edit(path, old, new):
+    data = path.read_bytes()
+    assert old in data
+    path.write_bytes(data.replace(old, new, 1))
+
+
+def test_record_a_new_file_edited_by_hand(project, capsys):
+    text = (project / 'final.pst').read_bytes().replace(b'rch  none', b'rch  log ')
+    (project / 'manual.pst').write_bytes(text)
+    capsys.readouterr()
+    main(['record', 'manual.pst', '--from', 'final.pst', '-m', 'rch log-transformed', '-m', 'see memo',
+          '--source', 'model.res'])
+    out = capsys.readouterr().out
+    assert 'par: 1 changed' in out and 'manifest written to' in out
+    m = find_manifests([str(project / 'manual.pst.manifest.json')])[0]
+    assert m['command'] == 'record' and m['note'] == 'rch log-transformed\nsee memo'
+    assert m['changes'] == 'par: 1 changed' and m['output']['npar'] == 4
+    assert [(os.path.basename(s['path']), s['role']) for s in m['sources']] == \
+        [('final.pst', 'edited from'), ('model.res', 'reference')]
+    main(['log', '--last', '1', '--check'])
+    line = capsys.readouterr().out.strip()
+    assert 'record     manual.pst <- final.pst, model.res' in line
+    assert line.endswith('"rch log-transformed / see memo"  unchanged')
+    main(['log', '--file', 'final.pst'])                 # the hand edit is part of final.pst's history
+    assert [ln.split()[2] for ln in capsys.readouterr().out.splitlines()] == ['parrep', 'record']
+
+
+def test_record_an_edit_in_place_keeps_the_earlier_manifest(project, capsys):
+    before = find_manifests([str(project / 'final.pst.manifest.json')])[0]['output']['sha256']
+    _edit(project / 'final.pst', b'rch  none', b'rch  log ')
+    main(['record', 'final.pst', '-m', 'rch log-transformed', '--comment'])
+    out = capsys.readouterr().out
+    assert 'comment added to final.pst' in out and 'earlier manifest kept as' in out
+    lines = (project / 'final.pst').read_bytes().splitlines(keepends=True)
+    assert lines[0].strip() == b'pcf' and lines[1].endswith(b'rch log-transformed' + lines[0][3:])
+    kept = [f for f in os.listdir(project) if f.startswith('final.pst.') and f != 'final.pst.manifest.json']
+    assert len(kept) == 1 and kept[0].endswith('.manifest.json')
+    m = find_manifests([str(project / 'final.pst.manifest.json')])[0]
+    assert m['previous']['manifest'].endswith(kept[0]) and m['sources'] == []
+    assert m['previous']['command'] == 'parrep' and m['previous']['sha256'] == before
+    main(['log', '--file', 'final.pst', '--check'])
+    status = [(ln.split()[2], ln.split()[-1]) for ln in capsys.readouterr().out.splitlines()]
+    assert status == [('parrep', 'changed'), ('record', 'unchanged')]      # the ledger shows both steps
+    main(['log', '--file', before[:12]])          # the version before the edit leads to the edit
+    assert [ln.split()[2] for ln in capsys.readouterr().out.splitlines()] == ['parrep', 'record']
+    main(['provenance', 'final.pst'])
+
+
+def test_note_is_kept_by_every_command_that_writes_a_manifest(project, capsys):
+    main(['set', 'final.pst', 'set.pst', '--par', 'rch:parval1=0.002', '--note', 'rch from the new recharge study',
+          '--note', 'check run'])
+    main(['dump', 'set.pst', 'set.xlsx', '--note', 'for review'])
+    m = find_manifests([str(project / 'set.pst.manifest.json')])[0]
+    assert m['note'] == 'rch from the new recharge study\ncheck run'
+    assert find_manifests([str(project / 'set.xlsx.manifest.json')])[0]['note'] == 'for review'
+    assert 'note' not in find_manifests([str(project / 'final.pst.manifest.json')])[0]
+    capsys.readouterr()
+    main(['log', '--last', '2'])
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].endswith('"rch from the new recharge study / check run"')
+    assert lines[1].endswith('"for review"')
+
+
+def test_record_needs_a_message_and_an_existing_file(project):
+    with pytest.raises(SystemExit):
+        main(['record', 'final.pst'])
+    with pytest.raises(SystemExit, match='not found'):
+        main(['record', 'absent.pst', '-m', 'x'])
+    with pytest.raises(SystemExit, match='the file itself'):
+        main(['record', 'final.pst', '--from', 'final.pst', '-m', 'x'])

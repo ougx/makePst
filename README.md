@@ -20,6 +20,7 @@ Excel / CSV tables                     ->  .pst                   makepst build
 .res/.rei or IES obs + existing .hp    ->  new .hp                makepst hpstart
 two .pst / workbooks                   ->  what changed           makepst diff
 manifests in a folder                  ->  run ledger             makepst log
+.pst edited by hand + a note           ->  manifest for the edit  makepst record
 .pst + everything it references        ->  zip for review         makepst bundle
 ```
 
@@ -468,6 +469,29 @@ the workbook?" even after the file was renamed or overwritten. `--check` adds a 
 2026-09-21 08:10 update     tr13-xlwings.xlsx <- tr13.xlsx, tr13.par  [1068 rows in 8 sheets]  makepst 0.5.0
 ```
 
+### record — a change made by hand
+
+```
+makepst record tr14.pst --from tr13.pst -m "HK bounds of layer 3 widened to 1e-3..500" [-m ...] [--source memo.pdf] [--comment]
+makepst record tr13.pst -m "noptmax 0 for a check run"          # edited in place
+```
+
+Every makePst command leaves a manifest; a control file edited in a text editor does not.
+`record` writes one for it: command `record`, the message (`-m`, one line each, required), the
+file as it is now (hash and counts), the file it was made from (`--from`, role `edited from`)
+and any other file the edit was based on (`--source`, role `reference`). With `--from` naming
+a control file or workbook, the two are compared as `diff` would and the summary is recorded
+under `changes` (`par: 3 changed; control: 1 changed`). The entry then appears in `log` with
+its message, and `log --file tr13.pst` follows the history through the hand edit.
+
+For an edit in place, the file's earlier manifest is not overwritten: it is kept as
+`tr13.pst.<its time>.manifest.json`, so the ledger shows both steps (the earlier one as
+`changed` under `--check`, since the file is no longer what that step wrote). The new manifest
+names it under `previous`, with the hash of the version before the edit, so `log --file <that
+hash>` leads from the old version to the edit. `--comment` also
+writes the message into the control file as dated `# ...` header lines (after `pcf` and any
+comments already there; nothing else in the file is touched), so the note travels with the file.
+
 ### bundle — a run, zipped for review
 
 ```
@@ -645,6 +669,13 @@ realization and `--set` values (and, from a workbook, the resolved build argumen
 left alone, and the backend. A hash mismatch between a manifest and the workbook on disk is
 the signal that the control file no longer corresponds to the spreadsheet.
 
+The manifest says what produced a file, not why. Every command that writes one takes
+`--note TEXT` (repeatable, one line each) for that: `makepst set tr13.pst tr14.pst --par
+"hk3*:parubnd=500" --note "HK upper bound per the slug tests"`. The note is stored under
+`note` and printed at the end of the run's `log` line. A `--note` in a workbook's BUILD sheet
+is added after the command line's. A change made by hand gets its manifest and note from
+`makepst record`.
+
 Run `makepst provenance model.pst` (or pass `model.pst.manifest.json`) to compare every
 recorded input and output hash with the files at their recorded paths. It reports
 `unchanged`, `changed`, `missing`, or `not recorded` and exits with status 1 unless all
@@ -724,7 +755,7 @@ makepst/
   writer.py         Pst -> .pst text (+ dump.tpl)
   reader.py         .pst text -> Pst
   excel.py          sheets -> Pst; Pst -> workbook; results -> existing workbook
-  cli.py            init / validate / build / dump / update / parrep / set / rescale / reweight / diff / tempchek / inschek / log / bundle
+  cli.py            init / validate / build / dump / update / parrep / set / rescale / reweight / diff / tempchek / inschek / log / bundle / record
   diff.py           semantic comparison of two Pst objects
   phi.py            objective function by group from residuals; IES realization phis
   reweight.py       observation-group balancing, scaling and bounded weight adjustment
@@ -732,7 +763,7 @@ makepst/
   checks.py         the validate report: table checks, template / instruction cross-checks, instruction interpreter
   rules.py          pestchek's rules (parameters, groups, observations, prior information, control variables)
   model_files.py    PEST's number writer, template filling, .obf files (tempchek / inschek)
-  provenance.py     the <output>.manifest.json sidecar; provenance / log / bundle
+  provenance.py     the <output>.manifest.json sidecar; provenance / log / bundle / record
   starter.py        the `init` workbook: control-variable descriptions, example rows, drop-downs
 examples/minimal/   the tutorial inputs
 tests/              suite + fixture generator
